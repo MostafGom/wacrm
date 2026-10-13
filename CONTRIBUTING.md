@@ -21,12 +21,13 @@ opinions become yours.
 git clone https://github.com/<your-username>/wacrm.git
 cd wacrm
 
-cp .env.local.example .env.local   # fill in Supabase + Meta creds
 npm install
+cp .env.local.example .env.local   # database URLs + Meta creds
+npm run db:migrate
 npm run dev
 ```
 
-Full setup (Supabase migrations, WhatsApp Business API, deploy) lives in
+Self-hosting this fork: [`docs/self-hosting.md`](./docs/self-hosting.md). Full upstream setup (WhatsApp Business API, deploy) lives in
 [`docs/`](./docs/README.md).
 
 ## Keeping your fork up to date

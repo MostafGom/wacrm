@@ -1,30 +1,81 @@
 name: wacrm
 
+# Self-contained stack: Postgres (with pgvector) + a one-shot migration
+# job + the app + a tiny scheduler for the cron endpoints. No external
+# services required.
+#
+#   cp .env.local.example .env.local   # fill it in
+#   docker compose --env-file .env.local up --build -d
+#
+# Passwords end up inside connection URLs — keep them URL-safe
+# (letters, digits, - and _), e.g. `openssl rand -hex 24`.
+
+x-app-image: &app-image
+  image: wacrm:local
+  build:
+    context: .
+    # NEXT_PUBLIC_* vars are inlined at build time — changing them
+    # requires a rebuild (docker compose up --build).
+    args:
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+      NEXT_PUBLIC_APP_LOCALE: ${NEXT_PUBLIC_APP_LOCALE:-en}
+
 services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: wacrm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.local}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published by default. Uncomment to reach it from the host
+    # (psql, backups, `npm run dev` against this database).
+    # ports:
+    #   - '${DB_PORT:-5432}:5432'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d wacrm']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Applies db/migrations/*.sql (idempotent; tracks what ran in
+  # _wacrm.schema_migrations) and sets the app role's password, then exits.
+  migrate:
+    <<: *app-image
+    command: ['node', 'scripts/migrate.mjs']
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/wacrm
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env.local}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+
   app:
-    build:
-      context: .
-      # NEXT_PUBLIC_* vars are inlined at build time — forward them
-      # from .env.local as build args. Changing any of them requires
-      # a rebuild (docker compose up --build).
-      args:
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
-        NEXT_PUBLIC_APP_LOCALE: ${NEXT_PUBLIC_APP_LOCALE:-en}
+    <<: *app-image
     # Runtime (server-only) secrets come from .env.local; they are
     # never baked into the image.
     env_file:
       - .env.local
-    # The server always listens on 3000 inside the container. Pinned
-    # here because `environment` wins over `env_file`, so a stray PORT
-    # in .env.local can't desync the app from the mapping and the
-    # healthcheck below.
+    # `environment` wins over `env_file`: point the app at the compose
+    # database / volume regardless of what .env.local says for local
+    # `npm run dev`. PORT is pinned so a stray PORT in .env.local can't
+    # desync the app from the mapping and the healthcheck below.
     environment:
       PORT: 3000
+      DATABASE_URL: postgres://wacrm_app:${APP_DB_PASSWORD}@db:5432/wacrm
+      MIGRATION_DATABASE_URL: ''
+      STORAGE_DIR: /data/storage
+    volumes:
+      - storage:/data/storage
     # Host side only — HOST_PORT=8080 publishes the app on :8080.
     ports:
       - '${HOST_PORT:-3000}:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test:
@@ -32,9 +83,37 @@ services:
           'CMD',
           'node',
           '-e',
-          "fetch('http://localhost:3000').then((r)=>process.exit(r.ok||r.status<500?0:1)).catch(()=>process.exit(1))",
+          "fetch('http://localhost:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Calls the automation + flow cron endpoints every CRON_INTERVAL
+  # seconds (default 60). Needs AUTOMATION_CRON_SECRET in .env.local;
+  # without it the endpoints answer 503 and nothing is scheduled.
+  cron:
+    image: curlimages/curl:8.11.1
+    environment:
+      AUTOMATION_CRON_SECRET: ${AUTOMATION_CRON_SECRET:-}
+      CRON_INTERVAL: ${CRON_INTERVAL:-60}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          for path in /api/automations/cron /api/flows/cron; do
+            curl -fsS -m 55 -H "x-cron-secret: $$AUTOMATION_CRON_SECRET" "http://app:3000$$path" >/dev/null \
+              || echo "cron: $$path failed"
+          done
+          sleep "$$CRON_INTERVAL"
+        done
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  storage:

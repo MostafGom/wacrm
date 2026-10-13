@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- results are untyped `any`, exactly like an untyped supabase-js client; callers cast to their own types. */
 // ============================================================
 // supabase-js compatible query builder.
 //
@@ -144,7 +145,8 @@ export class FilterBuilder<T = any[]> implements PromiseLike<DbResult<T>> {
   returns<U>(): FilterBuilder<U> {
     return this as unknown as FilterBuilder<U>;
   }
-  abortSignal(_signal: AbortSignal): this {
+  /** Accepted for API compatibility; queries are not cancellable. */
+  abortSignal(): this {
     return this;
   }
 
@@ -230,7 +232,8 @@ export class RpcBuilder<T = any> implements PromiseLike<DbResult<T>> {
   returns<U>(): RpcBuilder<U> {
     return this as unknown as RpcBuilder<U>;
   }
-  abortSignal(_signal: AbortSignal): this {
+  /** Accepted for API compatibility; queries are not cancellable. */
+  abortSignal(): this {
     return this;
   }
   toAst(): RpcAst {

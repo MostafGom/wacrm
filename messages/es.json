@@ -1474,7 +1474,14 @@
       "removeDialogDesc": "¿Quitar a <bold>{name}</bold> de la cuenta? Se cerrará su sesión en esta cuenta y recibirá una cuenta personal nueva en su próximo inicio de sesión. Su acceso no se elimina.",
       "cancel": "Cancelar",
       "removing": "Quitando...",
-      "removeBtn": "Quitar miembro"
+      "removeBtn": "Quitar miembro",
+      "resetLink": "Enlace para restablecer contraseña",
+      "resetLinkTitle": "Enlace para restablecer contraseña",
+      "resetLinkDesc": "Comparte este enlace de un solo uso con {name}. Caduca en una hora y le permite elegir una nueva contraseña.",
+      "resetLinkFailed": "No se pudo crear el enlace",
+      "copy": "Copiar",
+      "copied": "Enlace copiado",
+      "close": "Cerrar"
     },
     "invite": {
       "inviteCreated": "Invitación creada",
@@ -1709,7 +1716,7 @@
       "mediaTitle": "Almacenamiento de adjuntos",
       "mediaDesc": "Meta elimina los archivos recibidos unos 30 días después de su llegada. Los adjuntos pueden copiarse a tu propio almacenamiento para que sigan visibles.",
       "mirrorInbound": "Conservar adjuntos entrantes",
-      "mirrorInboundDesc": "Guarda una copia de cada foto, video, nota de voz y documento que envían los clientes. Usa tu almacenamiento de Supabase; los archivos de más de 16 MB se omiten.",
+      "mirrorInboundDesc": "Guarda una copia de cada foto, video, nota de voz y documento que envían los clientes. Usa el almacenamiento de archivos de este servidor; los archivos de más de 16 MB se omiten.",
       "mirrorInboundOffWarning": "Los nuevos adjuntos dejarán de copiarse y quedarán inaccesibles unos 30 días después de su llegada.",
       "mirrorInboundSaveFailed": "No se pudo actualizar la configuración de adjuntos.",
       "loadFailed": "Error al cargar la configuración de WhatsApp",
@@ -2058,7 +2065,9 @@
     "emailLabel": "Correo electrónico",
     "emailPlaceholder": "you@example.com",
     "sending": "Enviando...",
-    "sendLink": "Enviar enlace de restablecimiento"
+    "sendLink": "Enviar enlace de restablecimiento",
+    "noEmailTitle": "Pide ayuda al propietario",
+    "noEmailDesc": "Los correos de restablecimiento no están configurados en este servidor. Un propietario del espacio de trabajo puede generarte un enlace en Configuración → Miembros."
   },
   "ResetPasswordPage": {
     "title": "Elige una nueva contraseña",
@@ -2563,7 +2572,8 @@
         "loadFailed": "Error al cargar los miembros",
         "updateFailed": "Error al actualizar el miembro",
         "roleInvalid": "El rol debe ser owner, admin, agent o viewer",
-        "useTransferOwnership": "Usa POST /api/account/transfer-ownership para promover a un miembro a propietario"
+        "useTransferOwnership": "Usa POST /api/account/transfer-ownership para promover a un miembro a propietario",
+        "notFound": "Miembro no encontrado"
       },
       "nameMustBeString": "El nombre debe ser un texto",
       "nameEmpty": "El nombre de la cuenta no puede estar vacío",

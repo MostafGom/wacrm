@@ -19,6 +19,16 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
  *     deny them. A supply-chain compromise or a forgotten plugin
  *     can't silently opt back in.
  */
+// With STORAGE_DRIVER=s3 + S3_PUBLIC_BASE_URL, media is served from that
+// origin instead of /api/storage/public.
+const MEDIA_ORIGIN = (() => {
+  try {
+    return process.env.S3_PUBLIC_BASE_URL ? new URL(process.env.S3_PUBLIC_BASE_URL).origin : "";
+  } catch {
+    return "";
+  }
+})();
+
 const SECURITY_HEADERS = [
   {
     key: "Strict-Transport-Security",
@@ -45,17 +55,18 @@ const SECURITY_HEADERS = [
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       // Tailwind + inline style attributes on lots of components.
       "style-src 'self' 'unsafe-inline'",
-      // Supabase public-bucket avatars, contact avatars (arbitrary
-      // https URLs paste-able from the UI), OG images, data URLs for
-      // tiny inline assets.
+      // Uploaded avatars/media (same origin, or the optional S3 public
+      // base), contact avatars (arbitrary https URLs paste-able from
+      // the UI), OG images, data URLs for tiny inline assets.
       "img-src 'self' data: blob: https:",
       // Outbound media previews (blob: from MediaRecorder + file picker)
-      // and Supabase public-bucket audio/video the inbox renders.
-      "media-src 'self' blob: https://*.supabase.co",
+      // and stored audio/video the inbox renders.
+      `media-src 'self' blob:${MEDIA_ORIGIN ? ` ${MEDIA_ORIGIN}` : ""}`,
       "font-src 'self' data:",
-      // Supabase REST + realtime (WSS). All Meta API calls happen
-      // server-side, so graph.facebook.com does not belong here.
-      "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+      // Data API, auth and the realtime SSE stream are all same-origin.
+      // All Meta API calls happen server-side, so graph.facebook.com
+      // does not belong here.
+      "connect-src 'self'",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -133,7 +144,9 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: "/api/:path*",
+        // Public media (/api/storage/public/*) sets its own cacheable
+        // headers; everything else under /api is per-user.
+        source: "/api/:path((?!storage/public/).*)",
         headers: [{ key: "Cache-Control", value: "no-store" }],
       },
       {

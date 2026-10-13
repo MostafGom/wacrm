@@ -13,10 +13,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-violet.svg)](./LICENSE)
 [![CI](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml/badge.svg)](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org)
-[![Supabase](https://img.shields.io/badge/Supabase-Postgres%20%2B%20Auth-3ecf8e?logo=supabase)](https://supabase.com)
+[![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17%20%2B%20pgvector-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Stars](https://img.shields.io/github/stars/ArnasDon/wacrm?style=social)](https://github.com/ArnasDon/wacrm/stargazers)
 
-The marketing site and self-host docs live in a separate repo:
+> **This fork runs on plain PostgreSQL — no Supabase.** Auth, row-level
+> security, file storage and realtime are built into the app, so the
+> whole stack is `docker compose up`: one Postgres container and the
+> app. See [Architecture](#architecture-standalone-postgres) below and
+> [docs/self-hosting.md](./docs/self-hosting.md).
+
+The upstream marketing site and docs live in a separate repo:
 [ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)
 ([wacrm.tech](https://wacrm.tech)). This repo is the product —
 clone or fork it to run your own CRM.
@@ -59,11 +65,11 @@ clone or fork it to run your own CRM.
 
 This is a **template**, not a product. Forking means you get:
 
-- **Full ownership** — your code, your Supabase project, your domain,
+- **Full ownership** — your code, your database, your domain,
   your data. No SaaS lock-in, no seat pricing, no trust dance.
 - **Full customisation** — add the fields your team needs, remove the
   modules you don't, redesign anything. The stack is boring on
-  purpose (Next.js + Supabase + Tailwind) so the learning curve is
+  purpose (Next.js + PostgreSQL + Tailwind) so the learning curve is
   short.
 - **Zero ops to start** — [Hostinger](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST)
   Managed Node.js deploys a fork in a few clicks. No Docker, no
@@ -78,12 +84,29 @@ in an afternoon and make yours.
 
 ## Quick start
 
+### Docker (everything included)
+
 ```bash
-# Fork on GitHub first: https://github.com/ArnasDon/wacrm → Fork
 git clone https://github.com/<your-username>/wacrm.git
 cd wacrm
+cp .env.local.example .env.local   # set passwords, ENCRYPTION_KEY, Meta creds, PUBLIC_URL
+docker compose --env-file .env.local up --build -d
+```
+
+Compose starts Postgres 17 (+pgvector), applies every migration, then
+starts the app and a small scheduler for the cron endpoints. Open
+<http://localhost:3000/signup> — the first account becomes the owner of
+its workspace.
+
+### Local development
+
+```bash
 npm install
-cp .env.local.example .env.local   # fill in Supabase + Meta creds
+cp .env.local.example .env.local
+# a database to develop against:
+docker run -d --name wacrm-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=wacrm \
+  -p 5432:5432 pgvector/pgvector:pg17
+npm run db:migrate                 # uses MIGRATION_DATABASE_URL + APP_DB_PASSWORD
 npm run dev
 ```
 
@@ -123,9 +146,9 @@ Kubernetes cluster.
 | **Managed Node.js** | Next.js 16 (App Router, server actions, ISR) runs out of the box on [Premium, Business, and Cloud](https://www.hostinger.com/web-apps-hosting?REFERRALCODE=WACRMHOST) shared plans. You don't manage Node versions, processes, or reverse proxies. |
 | **Free SSL + free domain** | Automatic Let's Encrypt on your custom domain (or a free one included with annual plans). HTTPS is on by default — required for the WhatsApp Business webhook. |
 | **Global CDN + LiteSpeed** | Static assets cached at the edge, dynamic routes served from LiteSpeed. Snappy dashboards out of the box, no Cloudflare setup required. |
-| **Env vars + logs in hPanel** | Set `SUPABASE_*`, `WHATSAPP_*`, and `ENCRYPTION_KEY` from the panel — no `.env` on the server. Live application logs in the same UI. |
+| **Env vars + logs in hPanel** | Set `DATABASE_URL`, `WHATSAPP_*`, and `ENCRYPTION_KEY` from the panel — no `.env` on the server. Live application logs in the same UI. |
 | **DDoS protection + daily backups** | Built-in, no add-ons. The webhook endpoint is a public target — having protection at the edge matters. |
-| **Cheaper than a VPS** | Plans start at a few dollars a month — order-of-magnitude less than a comparable managed Node.js host, and you don't pay extra for the database (that's Supabase). |
+| **Cheaper than a VPS** | Plans start at a few dollars a month — order-of-magnitude less than a comparable managed Node.js host, and the database is any PostgreSQL 17 with pgvector. |
 | **24/7 human support** | Live chat support in 20+ languages — useful when your CRM is the thing your team relies on to talk to customers. |
 
 ### The 60-second version
@@ -133,26 +156,32 @@ Kubernetes cluster.
 1. **Fork** this repo on GitHub.
 2. In **hPanel → Websites → Create**, pick **Node.js** and connect
    your fork.
-3. Paste your Supabase + Meta env vars into hPanel.
+3. Point `DATABASE_URL` at a PostgreSQL 17 + pgvector database, run
+   `npm run db:migrate` against it once, and paste the remaining env
+   vars into hPanel.
 4. Push to `main`. Hostinger builds and serves it. Done.
 
 Full walkthrough with screenshots:
 **[wacrm.tech/docs/deployment-hostinger](https://wacrm.tech/docs/deployment-hostinger)**.
 
-> _Note: wacrm is MIT-licensed and runs anywhere Node.js does
-> (Vercel, Railway, your own VPS). Hostinger is recommended, not
-> required._
+> _Note: wacrm is MIT-licensed and runs anywhere a long-running
+> Node.js process and PostgreSQL do (a VPS with Docker, Railway,
+> Hostinger...). Live updates use Server-Sent Events, so short-lived
+> serverless functions are not a good fit._
 
 ## Documentation
 
-Full self-host documentation — Supabase migrations, WhatsApp Business
+Self-hosting this fork (database, auth, storage, realtime, migrating
+off Supabase): **[docs/self-hosting.md](./docs/self-hosting.md)** and
+[docs/docker.md](./docs/docker.md).
+
+Upstream documentation — WhatsApp Business
 API config, and production deploy — lives at
 **[wacrm.tech/docs](https://wacrm.tech/docs)**
 (source: [ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)).
 
 Key pages:
 - [Getting started](https://wacrm.tech/docs/getting-started)
-- [Supabase setup](https://wacrm.tech/docs/supabase-setup)
 - [WhatsApp setup](https://wacrm.tech/docs/whatsapp-setup)
 - [Environment variables](https://wacrm.tech/docs/environment-variables)
 - [Deploy on Hostinger](https://wacrm.tech/docs/deployment-hostinger)
@@ -163,15 +192,52 @@ Key pages:
   trace id to quote to Meta support
 - [Several WABAs on one deployment](./docs/multi-waba.md) — one Meta
   App or several; how `META_APP_SECRET` takes a comma-separated list
-- [Auth emails](./docs/auth-emails.md) — what Supabase must allow so
-  confirmation and password-reset links come back to *your* domain
-  instead of `localhost:3000`, and how `/auth/callback` handles them
+- [Auth emails](./docs/auth-emails.md) — optional SMTP for confirmation
+  and password-reset emails, and how resets work without it
 
 ## Stack
 
 - **App** — Next.js 16 (App Router), React 19, TypeScript, Tailwind v4.
-- **Data** — Supabase (Postgres + Auth + Storage + RLS).
+- **Data** — PostgreSQL 17 + pgvector, row-level security on every table.
+- **Auth / storage / realtime** — built in (no external services).
 - **WhatsApp** — Meta Cloud API (official WhatsApp Business API).
+
+## Architecture (standalone Postgres)
+
+```
+browser ──► Next.js (Node runtime)
+             ├─ /api/db           data API: query AST → SQL, runs as the user
+             ├─ /api/auth/*       sessions (HttpOnly cookie), scrypt passwords
+             ├─ /api/storage/*    uploads → local disk or S3; public media route
+             ├─ /api/realtime     Server-Sent Events  ◄── LISTEN wacrm_realtime
+             └─ route handlers / webhook / engines (service role)
+                      │
+                      ▼
+             PostgreSQL 17 + pgvector
+               roles: anon · authenticated · service_role (BYPASSRLS)
+               auth.uid() = per-transaction setting → RLS policies
+               NOTIFY triggers on realtime tables
+```
+
+- **RLS is kept, not rewritten.** The app connects as an unprivileged
+  `wacrm_app` login role and switches to `authenticated` (with
+  `auth.uid()` bound to the session user) for every transaction, so the
+  158 policies from the original migrations still decide what each
+  user can see. `db/migrations/000_supabase_compat.sql` recreates the
+  roles, `auth` / `storage` schemas and defaults those migrations
+  expected.
+- **Query layer.** `src/lib/db` implements the subset of the
+  supabase-js query API the app uses (embeds, `!inner`, `or()`, counts,
+  upserts, RPC) by compiling to parameterised SQL validated against the
+  live catalog. Browser components send the same AST to `/api/db`.
+- **Auth.** scrypt hashes (imported Supabase bcrypt hashes still work
+  and are upgraded on login), database-backed sessions, single-use
+  email / reset links, optional SMTP, owner- or CLI-generated reset links.
+- **Storage.** Local disk (default) or any S3-compatible service;
+  object metadata stays in `storage.objects` so bucket policies still
+  authorise uploads.
+- **Realtime.** Row triggers `pg_notify` changes; one LISTEN connection
+  per server fans them out over SSE, filtered per account.
 
 ## Contributing
 

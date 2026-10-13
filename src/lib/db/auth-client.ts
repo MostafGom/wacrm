@@ -139,8 +139,11 @@ export function createAuthClient(): AuthApi {
     },
 
     async resetPasswordForEmail(email, opts) {
-      const { error } = await call("POST", "/api/auth/recover", { email, redirectTo: opts?.redirectTo });
-      return { data: error ? null : {}, error };
+      const { data, error } = await call<{ mail_enabled: boolean }>("POST", "/api/auth/recover", {
+        email,
+        redirectTo: opts?.redirectTo,
+      });
+      return { data: data ? { mailEnabled: data.mail_enabled } : null, error };
     },
   };
 }

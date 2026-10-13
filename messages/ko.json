@@ -1474,7 +1474,14 @@
       "removeDialogDesc": "<bold>{name}</bold>을(를) 이 계정에서 제거하시겠습니까? 이 계정에서 로그아웃되며 다음 로그인 시 새로운 개인 계정이 발급됩니다. 로그인 정보 자체는 삭제되지 않습니다.",
       "cancel": "취소",
       "removing": "제거 중...",
-      "removeBtn": "멤버 제거"
+      "removeBtn": "멤버 제거",
+      "resetLink": "비밀번호 재설정 링크",
+      "resetLinkTitle": "비밀번호 재설정 링크",
+      "resetLinkDesc": "이 일회용 링크를 {name}님과 공유하세요. 1시간 후 만료되며 새 비밀번호를 설정할 수 있습니다.",
+      "resetLinkFailed": "재설정 링크를 만들 수 없습니다",
+      "copy": "복사",
+      "copied": "링크가 복사되었습니다",
+      "close": "닫기"
     },
     "invite": {
       "inviteCreated": "초대가 생성되었습니다",
@@ -1709,7 +1716,7 @@
       "mediaTitle": "첨부파일 저장",
       "mediaDesc": "Meta는 수신된 미디어를 도착 후 약 30일이 지나면 삭제합니다. 첨부파일을 자체 스토리지에 복사해 두면 계속 볼 수 있습니다.",
       "mirrorInbound": "수신 첨부파일 보관",
-      "mirrorInboundDesc": "고객이 보낸 사진, 동영상, 음성 메모, 문서를 모두 복사해 저장합니다. Supabase 스토리지를 사용하며 16MB를 초과하는 파일은 건너뜁니다.",
+      "mirrorInboundDesc": "고객이 보낸 사진, 동영상, 음성 메모, 문서를 모두 복사해 저장합니다. 서버 스토리지를 사용하며 16MB를 초과하는 파일은 건너뜁니다.",
       "mirrorInboundOffWarning": "새 첨부파일이 더 이상 복사되지 않으며, 도착 후 약 30일이 지나면 볼 수 없게 됩니다.",
       "mirrorInboundSaveFailed": "첨부파일 설정을 업데이트하지 못했습니다.",
       "loadFailed": "WhatsApp 설정을 불러오지 못했습니다",
@@ -2058,7 +2065,9 @@
     "emailLabel": "이메일",
     "emailPlaceholder": "you@example.com",
     "sending": "전송 중...",
-    "sendLink": "재설정 링크 보내기"
+    "sendLink": "재설정 링크 보내기",
+    "noEmailTitle": "워크스페이스 소유자에게 문의하세요",
+    "noEmailDesc": "이 서버에는 비밀번호 재설정 이메일이 설정되어 있지 않습니다. 워크스페이스 소유자가 설정 → 멤버에서 재설정 링크를 만들어 줄 수 있습니다."
   },
   "ResetPasswordPage": {
     "title": "새 비밀번호 설정",
@@ -2563,7 +2572,8 @@
         "loadFailed": "팀원 목록을 불러오지 못했습니다",
         "updateFailed": "팀원을 업데이트하지 못했습니다",
         "roleInvalid": "역할은 owner, admin, agent, viewer 중 하나여야 합니다",
-        "useTransferOwnership": "팀원을 소유자로 승격하려면 POST /api/account/transfer-ownership을 사용하세요"
+        "useTransferOwnership": "팀원을 소유자로 승격하려면 POST /api/account/transfer-ownership을 사용하세요",
+        "notFound": "멤버를 찾을 수 없습니다"
       },
       "nameMustBeString": "이름은 문자열이어야 합니다",
       "nameEmpty": "계정 이름은 비워둘 수 없습니다",

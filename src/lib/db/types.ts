@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- results are untyped `any`, exactly like an untyped supabase-js client; callers cast to their own types. */
 // ============================================================
 // Public client surface — the shape the app codes against.
 //
@@ -63,7 +64,7 @@ export interface AuthApi {
   resetPasswordForEmail(
     email: string,
     opts?: { redirectTo?: string },
-  ): Promise<{ data: Record<string, never> | null; error: AuthError | null }>;
+  ): Promise<{ data: { mailEnabled: boolean } | null; error: AuthError | null }>;
 }
 
 // ---------------- storage ----------------

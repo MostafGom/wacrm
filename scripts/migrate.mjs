@@ -40,7 +40,7 @@ const baselineIdx = args.indexOf("--baseline");
 const baseline = baselineIdx >= 0 ? args[baselineIdx + 1] : null;
 
 const connectionString =
-  process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
+  process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
 if (!connectionString) {
   console.error("MIGRATION_DATABASE_URL is not set");
   process.exit(1);

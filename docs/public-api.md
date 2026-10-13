@@ -294,7 +294,7 @@ last page.
 
 Rather than polling, register an endpoint and wacrm will POST to it when
 things happen in your account. **Migration required:** apply
-`supabase/migrations/028_webhook_endpoints.sql`.
+`db/migrations/028_webhook_endpoints.sql`.
 
 ### Events
 

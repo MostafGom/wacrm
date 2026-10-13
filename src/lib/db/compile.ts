@@ -88,12 +88,6 @@ function intOrThrow(v: unknown, what: string): number {
   return v;
 }
 
-/** Bind-ready value for a column. json/jsonb get stringified (node-pg would turn arrays into PG array literals). */
-function bindValue(col: ColumnInfo | null, value: unknown): unknown {
-  if (col?.isJson) return JSON.stringify(value);
-  return value;
-}
-
 // ------------------------------------------------------------
 // Select tree with resolved relationships
 // ------------------------------------------------------------

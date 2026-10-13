@@ -1474,7 +1474,14 @@
       "removeDialogDesc": "Remove <bold>{name}</bold> from the account? They'll be signed out of this account and given a fresh personal account on their next sign-in. Their login isn't deleted.",
       "cancel": "Cancel",
       "removing": "Removing...",
-      "removeBtn": "Remove member"
+      "removeBtn": "Remove member",
+      "resetLink": "Password reset link",
+      "resetLinkTitle": "Password reset link",
+      "resetLinkDesc": "Share this single-use link with {name}. It expires in one hour and lets them choose a new password.",
+      "resetLinkFailed": "Could not create a reset link",
+      "copy": "Copy",
+      "copied": "Link copied",
+      "close": "Close"
     },
     "invite": {
       "inviteCreated": "Invite created",
@@ -1709,7 +1716,7 @@
       "mediaTitle": "Attachment Storage",
       "mediaDesc": "Meta deletes received media about 30 days after it arrives. Attachments can be copied to your own storage so they stay viewable.",
       "mirrorInbound": "Keep inbound attachments",
-      "mirrorInboundDesc": "Save a copy of every photo, video, voice note and document customers send. Uses your Supabase storage; files over 16 MB are skipped.",
+      "mirrorInboundDesc": "Save a copy of every photo, video, voice note and document customers send. Uses this server's file storage; files over 16 MB are skipped.",
       "mirrorInboundOffWarning": "New attachments will stop being copied and will become unavailable about 30 days after they arrive.",
       "mirrorInboundSaveFailed": "Could not update the attachment setting.",
       "loadFailed": "Failed to load WhatsApp configuration",
@@ -2058,7 +2065,9 @@
     "emailLabel": "Email",
     "emailPlaceholder": "you@example.com",
     "sending": "Sending...",
-    "sendLink": "Send reset link"
+    "sendLink": "Send reset link",
+    "noEmailTitle": "Ask your workspace owner",
+    "noEmailDesc": "Password reset emails aren't set up on this server. A workspace owner can generate a reset link for you from Settings → Members."
   },
   "ResetPasswordPage": {
     "title": "Choose a new password",
@@ -2563,7 +2572,8 @@
         "loadFailed": "Failed to load members",
         "updateFailed": "Failed to update member",
         "roleInvalid": "'role' must be one of owner, admin, agent, viewer",
-        "useTransferOwnership": "Use POST /api/account/transfer-ownership to promote a member to owner"
+        "useTransferOwnership": "Use POST /api/account/transfer-ownership to promote a member to owner",
+        "notFound": "Member not found"
       },
       "nameMustBeString": "'name' must be a string",
       "nameEmpty": "Account name cannot be empty",

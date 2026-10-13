@@ -1474,7 +1474,14 @@
       "removeDialogDesc": "Remover <bold>{name}</bold> da conta? A pessoa será desconectada desta conta e receberá uma nova conta pessoal no próximo login. O login dela não é excluído.",
       "cancel": "Cancelar",
       "removing": "Removendo...",
-      "removeBtn": "Remover membro"
+      "removeBtn": "Remover membro",
+      "resetLink": "Link de redefinição de senha",
+      "resetLinkTitle": "Link de redefinição de senha",
+      "resetLinkDesc": "Compartilhe este link de uso único com {name}. Ele expira em uma hora e permite escolher uma nova senha.",
+      "resetLinkFailed": "Não foi possível criar o link de redefinição",
+      "copy": "Copiar",
+      "copied": "Link copiado",
+      "close": "Fechar"
     },
     "invite": {
       "inviteCreated": "Convite criado",
@@ -1709,7 +1716,7 @@
       "mediaTitle": "Armazenamento de anexos",
       "mediaDesc": "A Meta exclui as mídias recebidas cerca de 30 dias após a chegada. Os anexos podem ser copiados para o seu próprio armazenamento para continuarem visíveis.",
       "mirrorInbound": "Manter anexos recebidos",
-      "mirrorInboundDesc": "Salva uma cópia de cada foto, vídeo, mensagem de voz e documento enviado pelos clientes. Usa seu armazenamento do Supabase; arquivos acima de 16 MB são ignorados.",
+      "mirrorInboundDesc": "Salva uma cópia de cada foto, vídeo, mensagem de voz e documento enviado pelos clientes. Usa o armazenamento de arquivos deste servidor; arquivos acima de 16 MB são ignorados.",
       "mirrorInboundOffWarning": "Novos anexos deixarão de ser copiados e ficarão indisponíveis cerca de 30 dias após a chegada.",
       "mirrorInboundSaveFailed": "Não foi possível atualizar a configuração de anexos.",
       "loadFailed": "Falha ao carregar a configuração do WhatsApp",
@@ -2058,7 +2065,9 @@
     "emailLabel": "E-mail",
     "emailPlaceholder": "voce@exemplo.com",
     "sending": "Enviando...",
-    "sendLink": "Enviar link de redefinição"
+    "sendLink": "Enviar link de redefinição",
+    "noEmailTitle": "Fale com o proprietário do espaço",
+    "noEmailDesc": "Os e-mails de redefinição de senha não estão configurados neste servidor. Um proprietário do espaço de trabalho pode gerar um link de redefinição em Configurações → Membros."
   },
   "ResetPasswordPage": {
     "title": "Escolha uma nova senha",
@@ -2563,7 +2572,8 @@
         "loadFailed": "Falha ao carregar os membros",
         "updateFailed": "Falha ao atualizar o membro",
         "roleInvalid": "A função deve ser owner, admin, agent ou viewer",
-        "useTransferOwnership": "Use POST /api/account/transfer-ownership para promover um membro a proprietário"
+        "useTransferOwnership": "Use POST /api/account/transfer-ownership para promover um membro a proprietário",
+        "notFound": "Membro não encontrado"
       },
       "nameMustBeString": "O nome deve ser um texto",
       "nameEmpty": "O nome da conta não pode ficar vazio",

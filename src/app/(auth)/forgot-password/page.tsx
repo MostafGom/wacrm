@@ -22,6 +22,7 @@ export default function ForgotPasswordPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [mailEnabled, setMailEnabled] = useState(true);
   const supabase = createClient();
 
   const handleReset = async (e: React.FormEvent) => {
@@ -31,10 +32,9 @@ export default function ForgotPasswordPage() {
 
     // The emailed link returns to /auth/callback, which exchanges it
     // for a recovery session and forwards to /reset-password (issue
-    // #592). Supabase must allow this origin under Authentication →
-    // URL Configuration → Redirect URLs, or it silently falls back to
-    // its Site URL; see docs/auth-emails.md.
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    // #592). Without SMTP no email is sent — the page then tells the
+    // user to ask a workspace owner for a reset link instead.
+    const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent("/reset-password")}`,
     });
 
@@ -44,6 +44,7 @@ export default function ForgotPasswordPage() {
       return;
     }
 
+    setMailEnabled(data?.mailEnabled !== false);
     setSuccess(true);
     setLoading(false);
   };
@@ -57,15 +58,17 @@ export default function ForgotPasswordPage() {
               <CheckCircle className="h-6 w-6 text-primary" />
             </div>
             <CardTitle className="text-xl text-foreground">
-              {t("checkEmailTitle")}
+              {mailEnabled ? t("checkEmailTitle") : t("noEmailTitle")}
             </CardTitle>
             <CardDescription className="text-muted-foreground">
-              {t.rich("checkEmailDesc", {
-                email,
-                strong: (chunks) => (
-                  <span className="text-foreground">{chunks}</span>
-                ),
-              })}
+              {mailEnabled
+                ? t.rich("checkEmailDesc", {
+                    email,
+                    strong: (chunks) => (
+                      <span className="text-foreground">{chunks}</span>
+                    ),
+                  })
+                : t("noEmailDesc")}
             </CardDescription>
           </CardHeader>
           <CardContent>

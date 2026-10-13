@@ -17,6 +17,7 @@ let alice: SeededUser;
 let bob: SeededUser;
 
 function collector(user: SeededUser) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose event payloads in assertions
   const events: Array<{ event: string; data: any }> = [];
   const sub: Subscriber = {
     accountId: user.accountId,

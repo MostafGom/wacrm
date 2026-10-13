@@ -15,5 +15,12 @@ export function publicBaseUrl(): string {
 
 export function publicObjectUrl(bucket: string, path: string, base = publicBaseUrl()): string {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
+  // S3 driver with a public bucket / CDN in front of it: link straight
+  // to it (keys are `<bucket>/<path>`, see storage/s3.ts). Server-side
+  // only — the browser gets this URL back from the upload route.
+  const s3Public = process.env.S3_PUBLIC_BASE_URL;
+  if (s3Public && process.env.STORAGE_DRIVER === "s3") {
+    return `${s3Public.replace(/\/+$/, "")}/${encodeURIComponent(bucket)}/${encoded}`;
+  }
   return `${base}${PUBLIC_STORAGE_PREFIX}/${encodeURIComponent(bucket)}/${encoded}`;
 }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- results are untyped `any`, exactly like an untyped supabase-js client; callers cast to their own types. */
 // ============================================================
 // Browser realtime facade — `supabase.channel(...)
 //   .on('postgres_changes', { event, table, filter }, cb)

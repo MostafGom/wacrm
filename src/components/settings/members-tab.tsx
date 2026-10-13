@@ -25,6 +25,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
   AlertTriangle,
+  Copy,
+  KeyRound,
   Loader2,
   Mail,
   MailX,
@@ -127,7 +129,7 @@ function fmtExpiresIn(iso: string, t: (key: string, values?: Record<string, stri
 export function MembersTab() {
   const t = useTranslations('Settings.members');
   const tRoles = useTranslations('Settings.roles');
-  const { user, canManageMembers } = useAuth();
+  const { user, canManageMembers, isOwner } = useAuth();
   const { getPresence, getRow, now } = usePresence();
 
   const [members, setMembers] = useState<Member[]>([]);
@@ -136,6 +138,7 @@ export function MembersTab() {
 
   const [inviteOpen, setInviteOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
+  const [resetLink, setResetLink] = useState<{ name: string; url: string } | null>(null);
   const [pendingMemberAction, setPendingMemberAction] = useState<string | null>(
     null,
   );
@@ -248,6 +251,26 @@ export function MembersTab() {
       setRemovingMember(null);
     } catch (err) {
       console.error('[MembersTab] remove error:', err);
+      toast.error(t('networkError'));
+    } finally {
+      setPendingMemberAction(null);
+    }
+  }
+
+  // Owner-only: mint a one-hour reset link for a teammate. This is the
+  // password-reset path on installs without SMTP.
+  async function handleResetLink(member: Member) {
+    setPendingMemberAction(member.user_id);
+    try {
+      const res = await fetch(`/api/account/members/${member.user_id}/reset-link`, { method: 'POST' });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.url) {
+        toast.error(payload.error || t('resetLinkFailed'));
+        return;
+      }
+      setResetLink({ name: member.full_name || t('unnamed'), url: payload.url });
+    } catch (err) {
+      console.error('[MembersTab] reset link error:', err);
       toast.error(t('networkError'));
     } finally {
       setPendingMemberAction(null);
@@ -454,6 +477,25 @@ export function MembersTab() {
                         user moused over. Now red is the default
                         state with a darker shade on hover so the
                         affordance reads at-a-glance. */}
+                    {isOwner && !isSelf && (
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              aria-label={t('resetLink')}
+                              onClick={() => handleResetLink(member)}
+                              disabled={isBusy}
+                            />
+                          }
+                        >
+                          <KeyRound className="size-4" />
+                        </TooltipTrigger>
+                        <TooltipContent>{t('resetLink')}</TooltipContent>
+                      </Tooltip>
+                    )}
+
                     {canManageMembers && !isOwnerRow && !isSelf && (
                       <Button
                         variant="outline"
@@ -565,6 +607,54 @@ export function MembersTab() {
         onOpenChange={setInviteOpen}
         onCreated={loadEverything}
       />
+
+      <Dialog
+        open={resetLink !== null}
+        onOpenChange={(open) => {
+          if (!open) setResetLink(null);
+        }}
+      >
+        <DialogContent className="bg-popover border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-popover-foreground">
+              <KeyRound className="size-4" />
+              {t('resetLinkTitle')}
+            </DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              {t('resetLinkDesc', { name: resetLink?.name ?? '' })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-2">
+            <input
+              readOnly
+              value={resetLink?.url ?? ''}
+              onFocus={(e) => e.currentTarget.select()}
+              className="min-w-0 flex-1 rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs text-foreground"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                if (!resetLink) return;
+                try {
+                  await navigator.clipboard.writeText(resetLink.url);
+                  toast.success(t('copied'));
+                } catch {
+                  // Clipboard blocked (http / permissions) — the field is selectable.
+                }
+              }}
+            >
+              <Copy className="size-4" />
+              {t('copy')}
+            </Button>
+          </div>
+          <DialogFooter className="bg-popover border-border">
+            <Button variant="outline" onClick={() => setResetLink(null)} className="border-border">
+              {t('close')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={removingMember !== null}

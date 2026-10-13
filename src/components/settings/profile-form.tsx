@@ -27,7 +27,7 @@ const ALLOWED_MIME = new Set([
   'image/gif',
 ]);
 
-// Rough email shape check — the real validator is Supabase Auth, which
+// Rough email shape check — the real validator is the auth API, which
 // rejects anything malformed when we call updateUser({ email }). We
 // just want to stop obvious typos before making a network call.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -159,7 +159,7 @@ export function ProfileForm() {
       // trigger pattern in production deployments).
       let emailSent = false;
       if (trimmedEmail.toLowerCase() !== profile.email.toLowerCase()) {
-        const { error: emailError } = await supabase.auth.updateUser({
+        const { data: updated, error: emailError } = await supabase.auth.updateUser({
           email: trimmedEmail,
         });
         if (emailError) {
@@ -170,7 +170,9 @@ export function ProfileForm() {
           await refreshProfile();
           return;
         }
-        emailSent = true;
+        // With SMTP configured the change waits for the confirmation
+        // link; without it the server applies it immediately.
+        emailSent = updated.user?.email?.toLowerCase() !== trimmedEmail.toLowerCase();
       }
 
       setEmailChangePending(emailSent);

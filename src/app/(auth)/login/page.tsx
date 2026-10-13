@@ -70,8 +70,8 @@ function LoginPageInner() {
     }
 
     // Full-page navigation (not router.push) so the browser issues a
-    // fresh top-level request that carries the just-written Supabase
-    // auth cookies to the middleware gating /dashboard. A soft
+    // fresh top-level request that carries the just-written session
+    // cookie to the proxy gating /dashboard. A soft
     // client-side navigation can reach the protected route before the
     // server observes the new session, so the middleware bounces it
     // back to /login — which looks like the page "just refreshing"
