@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
+import { asUser, userRunner } from '@/server/db';
 import { addContactTagAndDispatch } from '@/lib/contacts/tag-events';
 import {
   ContactTagWriteError,
@@ -36,7 +37,7 @@ export async function POST(
     }
 
     const result = await addContactTagAndDispatch({
-      db: ctx.supabase,
+      run: userRunner(ctx.userId),
       accountId: ctx.accountId,
       contactId,
       tagId,
@@ -63,11 +64,13 @@ export async function DELETE(
       return NextResponse.json({ error: t('contacts.tagIdRequired') }, { status: 400 });
     }
 
-    await removeContactTag(ctx.supabase, {
-      accountId: ctx.accountId,
-      contactId,
-      tagId,
-    });
+    await asUser(ctx.userId, (db) =>
+      removeContactTag(db, {
+        accountId: ctx.accountId,
+        contactId,
+        tagId,
+      })
+    );
 
     return NextResponse.json({ ok: true });
   } catch (error) {

@@ -13,14 +13,16 @@ vi.mock('@/lib/automations/engine', () => ({
   runAutomationsForTrigger: mocks.dispatch,
 }));
 
+import type { Runner } from '@/server/db';
 import {
   addContactTagAndDispatch,
   getTagChainDepth,
   MAX_TAG_CHAIN_DEPTH,
 } from './tag-events';
 
+// The runner just invokes the callback; tag-write itself is mocked.
 const base = {
-  db: {} as never,
+  run: (<T,>(fn: (db: never) => Promise<T>) => fn({} as never)) as Runner,
   accountId: 'account-1',
   contactId: 'contact-1',
   tagId: 'tag-1',

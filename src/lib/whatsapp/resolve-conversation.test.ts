@@ -1,6 +1,46 @@
 import { describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@/lib/db';
 
+import { vi } from 'vitest';
+
+// Contact lookups and the audit owner go through repositories (asService);
+// they read the same per-test script as the chainable stub below.
+const current = vi.hoisted(() => ({
+  script: null as null | {
+    config?: { user_id: string } | null;
+    contactCandidates?: { id: string; phone: string }[];
+    contactCandidatesByCall?: { id: string; phone: string }[][];
+  },
+  likeCalls: 0,
+}));
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule());
+vi.mock('@/lib/contacts/dedupe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/lib/contacts/dedupe')>();
+  const { phonesMatch } = await import('@/lib/whatsapp/phone-utils');
+  return {
+    ...real,
+    findExistingContact: async (_db: unknown, _accountId: string, phone: string) => {
+      const s = current.script ?? {};
+      const list = s.contactCandidatesByCall
+        ? (s.contactCandidatesByCall[current.likeCalls] ?? [])
+        : (s.contactCandidates ?? []);
+      current.likeCalls++;
+      return list.find((c) => phonesMatch(c.phone, phone)) ?? null;
+    },
+  };
+});
+vi.mock('@/lib/api/v1/contacts', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/lib/api/v1/contacts')>();
+  return {
+    ...real,
+    resolveAuditUserId: async () => {
+      const owner = current.script?.config?.user_id;
+      if (!owner) throw new real.ContactError('Account owner could not be resolved', 500);
+      return owner;
+    },
+  };
+});
+
 import { resolveConversationByPhone } from './resolve-conversation';
 import { SendMessageError } from './send-message';
 
@@ -30,6 +70,8 @@ interface Script {
 }
 
 function makeDb(script: Script): SupabaseClient {
+  current.script = script;
+  current.likeCalls = 0;
   let table = '';
   let mode: 'select' | 'insert' | 'update' = 'select';
   let likeCalls = 0;

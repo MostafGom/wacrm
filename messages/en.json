@@ -2639,7 +2639,12 @@
       "nameTriggerRequired": "name and trigger_type are required"
     },
     "contacts": {
-      "tagIdRequired": "tag_id required"
+      "tagIdRequired": "tag_id required",
+      "duplicatePhone": "A contact with this phone number already exists.",
+      "phoneInvalid": "'phone' must be an international phone number with a leading + and country code (e.g. +14155550123)",
+      "nameRequired": "name is required",
+      "contentRequired": "content is required",
+      "loadFailed": "Failed to load contacts"
     },
     "flows": {
       "statusInvalid": "status must be one of 'draft' | 'active' | 'archived'",

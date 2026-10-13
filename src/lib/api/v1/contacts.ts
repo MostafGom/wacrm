@@ -7,15 +7,13 @@
 // webhook and send path use), and one tag-sync routine.
 // ============================================================
 
-import type { SupabaseClient } from '@/lib/db';
+import type { Db, Runner } from '@/server/db';
 
-import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
+import { findExistingContact } from '@/lib/contacts/dedupe';
+import { getContactWithTags } from '@/server/repos/contacts';
 import { resolveImportTagIds } from '@/lib/contacts/resolve-import-tags';
 import { addContactTagAndDispatch } from '@/lib/contacts/tag-events';
 import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
-
-/** Row select that embeds the contact's tags for serialization. */
-export const CONTACT_SELECT = '*, contact_tags(tags(*))';
 
 export interface ApiContact {
   id: string;
@@ -41,7 +39,7 @@ export class ContactError extends Error {
 
 type RawTagJoin = { tags: { id: string; name: string; color: string } | null };
 
-/** Flatten a `CONTACT_SELECT` row into the public contact shape. */
+/** Flatten a contact row with its `contact_tags` embed into the public contact shape. */
 export function serializeContact(row: Record<string, unknown>): ApiContact {
   const joins = (row.contact_tags as RawTagJoin[] | undefined) ?? [];
   return {
@@ -71,23 +69,22 @@ export function serializeContact(row: Record<string, unknown>): ApiContact {
  * account owner when there's no config yet.
  */
 export async function resolveAuditUserId(
-  db: SupabaseClient,
+  db: Db,
   accountId: string
 ): Promise<string> {
-  const { data: config } = await db
-    .from('whatsapp_config')
+  const config = await db
+    .selectFrom('whatsapp_config')
     .select('user_id')
-    .eq('account_id', accountId)
-    .maybeSingle();
-  const configOwner = config?.user_id as string | undefined;
-  if (configOwner) return configOwner;
+    .where('account_id', '=', accountId)
+    .executeTakeFirst();
+  if (config?.user_id) return config.user_id;
 
-  const { data: account } = await db
-    .from('accounts')
+  const account = await db
+    .selectFrom('accounts')
     .select('owner_user_id')
-    .eq('id', accountId)
-    .maybeSingle();
-  const owner = account?.owner_user_id as string | undefined;
+    .where('id', '=', accountId)
+    .executeTakeFirst();
+  const owner = account?.owner_user_id;
   if (!owner) {
     throw new ContactError('Account owner could not be resolved', 500);
   }
@@ -108,7 +105,7 @@ export interface ContactInput {
  * API-created contact is indistinguishable from a webhook-created one.
  */
 export async function findOrCreateContact(
-  db: SupabaseClient,
+  db: Db,
   accountId: string,
   auditUserId: string,
   input: ContactInput
@@ -128,9 +125,9 @@ export async function findOrCreateContact(
   const existing = await findExistingContact(db, accountId, sanitized);
   if (existing) return { id: existing.id, created: false };
 
-  const { data: created, error } = await db
-    .from('contacts')
-    .insert({
+  const created = await db
+    .insertInto('contacts')
+    .values({
       account_id: accountId,
       user_id: auditUserId,
       phone: sanitized,
@@ -138,17 +135,15 @@ export async function findOrCreateContact(
       email: input.email ?? null,
       company: input.company ?? null,
     })
-    .select('id')
-    .single();
+    .onConflict((oc) => oc.doNothing())
+    .returning('id')
+    .executeTakeFirst();
 
-  if (error || !created) {
+  if (!created) {
     // Lost a race against a concurrent create — the unique index
-    // rejected the duplicate. Re-resolve to the winner.
-    if (isUniqueViolation(error)) {
-      const raced = await findExistingContact(db, accountId, sanitized);
-      if (raced) return { id: raced.id, created: false };
-    }
-    console.error('[api/v1/contacts] create error:', error);
+    // held the number. Re-resolve to the winner.
+    const raced = await findExistingContact(db, accountId, sanitized);
+    if (raced) return { id: raced.id, created: false };
     throw new ContactError('Failed to create contact', 500);
   }
 
@@ -165,18 +160,20 @@ export async function findOrCreateContact(
  * from the map's values (#560).
  */
 export async function setContactTags(
-  db: SupabaseClient,
+  run: Runner,
   accountId: string,
   auditUserId: string,
   contactId: string,
   tagNames: string[]
 ): Promise<void> {
-  const { tagIdByKey } = await resolveImportTagIds(db, {
-    accountId,
-    userId: auditUserId,
-    tagNames,
-    canCreateTags: true,
-  });
+  const { tagIdByKey } = await run((db) =>
+    resolveImportTagIds(db, {
+      accountId,
+      userId: auditUserId,
+      tagNames,
+      canCreateTags: true,
+    })
+  );
   // Same normalization `resolveImportTagIds` applies to `tagNames`
   // (trim, lowercase, skip empty) so every requested name resolves.
   const desired = new Set<string>();
@@ -192,33 +189,28 @@ export async function setContactTags(
   // failure can never wipe tags that were meant to stay. Every write
   // is error-checked and surfaced as a ContactError (→ 500) instead of
   // being swallowed behind a misleading 200.
-  const { data: current, error: readErr } = await db
-    .from('contact_tags')
-    .select('tag_id')
-    .eq('contact_id', contactId);
-  if (readErr) {
-    throw new ContactError('Failed to read contact tags', 500);
-  }
-  const existing = new Set(
-    (current ?? []).map((r) => r.tag_id as string)
+  const current = await run((db) =>
+    db.selectFrom('contact_tags').select('tag_id').where('contact_id', '=', contactId).execute()
   );
+  const existing = new Set(current.map((r) => r.tag_id));
 
   const toAdd = [...desired].filter((id) => !existing.has(id));
   const toRemove = [...existing].filter((id) => !desired.has(id));
 
   if (toRemove.length > 0) {
-    const { error } = await db
-      .from('contact_tags')
-      .delete()
-      .eq('contact_id', contactId)
-      .in('tag_id', toRemove);
-    if (error) throw new ContactError('Failed to update contact tags', 500);
+    await run((db) =>
+      db
+        .deleteFrom('contact_tags')
+        .where('contact_id', '=', contactId)
+        .where('tag_id', 'in', toRemove)
+        .execute()
+    );
   }
   if (toAdd.length > 0) {
     for (const tagId of toAdd) {
       try {
         await addContactTagAndDispatch({
-          db,
+          run,
           accountId,
           contactId,
           tagId,
@@ -233,16 +225,10 @@ export async function setContactTags(
 
 /** Fetch + serialize a single contact scoped to the account, or null. */
 export async function getContactById(
-  db: SupabaseClient,
+  db: Db,
   accountId: string,
   contactId: string
 ): Promise<ApiContact | null> {
-  const { data, error } = await db
-    .from('contacts')
-    .select(CONTACT_SELECT)
-    .eq('id', contactId)
-    .eq('account_id', accountId)
-    .maybeSingle();
-  if (error || !data) return null;
-  return serializeContact(data as Record<string, unknown>);
+  const row = await getContactWithTags(db, accountId, contactId);
+  return row ? serializeContact(row as unknown as Record<string, unknown>) : null;
 }

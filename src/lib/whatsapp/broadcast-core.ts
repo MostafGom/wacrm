@@ -28,6 +28,7 @@ import {
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import { asService } from '@/server/db';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -154,9 +155,11 @@ export async function createBroadcast(
       rejected++;
       continue;
     }
-    const { id } = await findOrCreateContact(db, accountId, auditUserId, {
-      phone: to,
-    });
+    const { id } = await asService((tx) =>
+      findOrCreateContact(tx, accountId, auditUserId, {
+        phone: to,
+      }),
+    );
     resolved.push({
       contactId: id,
       phone: sanitized,

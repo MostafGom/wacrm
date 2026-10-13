@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { SupabaseClient } from '@/lib/db';
+import type { Db, Runner } from '@/server/db';
 
 // Mock the two collaborators `setContactTags` writes through so the
 // tests can assert exactly which joins it adds and removes.
@@ -65,7 +65,7 @@ describe('serializeContact', () => {
 });
 
 describe('findOrCreateContact', () => {
-  const noopDb = {} as SupabaseClient;
+  const noopDb = {} as Db;
 
   it('rejects a non-E.164 phone with a 400 ContactError', async () => {
     await expect(
@@ -91,34 +91,38 @@ describe('findOrCreateContact', () => {
 
 describe('setContactTags', () => {
   /**
-   * Fake just enough of the Supabase query builder for the two
-   * `contact_tags` calls `setContactTags` makes: the current-joins read
-   * and the diff delete. Records which tag ids were removed.
+   * Fake just enough of the Kysely builder for the two `contact_tags`
+   * statements `setContactTags` runs: the current-joins read and the
+   * diff delete. Records which tag ids were removed. The runner just
+   * invokes the callback with it.
    */
   function fakeContactTagsDb(currentTagIds: string[]) {
     const removed: string[] = [];
-    const builder = {
-      select: () => ({
-        eq: async () => ({
-          data: currentTagIds.map((tag_id) => ({ tag_id })),
-          error: null,
-        }),
-      }),
-      delete: () => ({
-        eq: () => ({
-          in: async (_col: string, ids: string[]) => {
-            removed.push(...ids);
-            return { error: null };
-          },
-        }),
-      }),
-    };
-    const db = {
-      from: (table: string) => {
+    const fake = {
+      selectFrom: (table: string) => {
         expect(table).toBe('contact_tags');
-        return builder;
+        return {
+          select: () => ({
+            where: () => ({
+              execute: async () => currentTagIds.map((tag_id) => ({ tag_id })),
+            }),
+          }),
+        };
       },
-    } as unknown as SupabaseClient;
+      deleteFrom: (table: string) => {
+        expect(table).toBe('contact_tags');
+        return {
+          where: () => ({
+            where: (_col: string, _op: string, ids: string[]) => ({
+              execute: async () => {
+                removed.push(...ids);
+              },
+            }),
+          }),
+        };
+      },
+    };
+    const db: Runner = (fn) => fn(fake as unknown as Db);
     return { db, removed };
   }
 

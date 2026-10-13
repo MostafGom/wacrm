@@ -37,6 +37,7 @@ import { requireApiKey } from '@/lib/auth/api-context';
 export const maxDuration = 60;
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { resolveAuditUserId, ContactError } from '@/lib/api/v1/contacts';
+import { asService } from '@/server/db';
 import {
   createBroadcast,
   deliverBroadcast,
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
       typeof body.template_name === 'string' ? body.template_name : '';
     const recipients = Array.isArray(body.recipients) ? body.recipients : [];
 
-    const auditUserId = await resolveAuditUserId(ctx.supabase, ctx.accountId);
+    const auditUserId = await asService((db) => resolveAuditUserId(db, ctx.accountId));
 
     const plan = await createBroadcast(ctx.supabase, ctx.accountId, auditUserId, {
       name: typeof body.name === 'string' ? body.name : null,

@@ -1,4 +1,4 @@
-import type { SupabaseClient } from "@/lib/db";
+import type { Db } from "@/server/db";
 import {
   normalizePhone,
   parseInternationalPhone,
@@ -37,7 +37,7 @@ export interface ExistingContact {
  * the small candidate set — the exact approach the webhook has used.
  */
 export async function findExistingContact(
-  db: SupabaseClient,
+  db: Db,
   accountId: string,
   phone: string,
 ): Promise<ExistingContact | null> {
@@ -46,17 +46,14 @@ export async function findExistingContact(
 
   const suffix = normalized.length >= 8 ? normalized.slice(-8) : normalized;
 
-  const { data, error } = await db
-    .from("contacts")
-    .select("*")
-    .eq("account_id", accountId)
-    .like("phone", `%${suffix}`);
+  const candidates = await db
+    .selectFrom("contacts")
+    .selectAll()
+    .where("account_id", "=", accountId)
+    .where("phone", "like", `%${suffix}`)
+    .execute();
 
-  if (error || !data) return null;
-
-  return (
-    (data as ExistingContact[]).find((c) => phonesMatch(c.phone, phone)) ?? null
-  );
+  return (candidates as ExistingContact[]).find((c) => phonesMatch(c.phone, phone)) ?? null;
 }
 
 /**

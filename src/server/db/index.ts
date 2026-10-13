@@ -76,4 +76,15 @@ export function asAnon<T>(fn: (db: Db) => Promise<T>, opts?: RunOptions): Promis
   return withRole("anon", null, fn, opts);
 }
 
+/**
+ * "How to run DB work" — handed to services that interleave database
+ * steps with side effects (Meta calls, automation dispatch) and so
+ * can't live inside one caller-owned transaction. Each call is its own
+ * short transaction under the caller's role.
+ */
+export type Runner = <T>(fn: (db: Db) => Promise<T>) => Promise<T>;
+
+export const userRunner = (userId: string): Runner => (fn) => asUser(userId, fn);
+export const serviceRunner: Runner = (fn) => asService(fn);
+
 export { sql };

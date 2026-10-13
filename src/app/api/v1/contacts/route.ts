@@ -10,13 +10,10 @@
 
 import { requireApiKey } from '@/lib/auth/api-context';
 import { ok, okList, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
+import { parseListParams, buildPage } from '@/lib/api/v1/pagination';
+import { asService, serviceRunner } from '@/server/db';
+import { listContactsKeyset } from '@/server/repos/contacts';
 import {
-  parseListParams,
-  keysetFilter,
-  buildPage,
-} from '@/lib/api/v1/pagination';
-import {
-  CONTACT_SELECT,
   serializeContact,
   findOrCreateContact,
   setContactTags,
@@ -25,9 +22,9 @@ import {
   ContactError,
 } from '@/lib/api/v1/contacts';
 
-// PostgREST filter values are comma/paren-delimited; strip anything
-// that could break the `.or()` grammar before interpolating a search
-// term. Leaves the characters a phone or name legitimately contains.
+// Bound the search term to the characters a phone or name legitimately
+// contains (it is a bind parameter, so this is about predictability,
+// not injection).
 function sanitizeSearch(raw: string): string {
   return raw.replace(/[^\p{L}\p{N} +@.\-_]/gu, '').trim();
 }
@@ -40,52 +37,13 @@ export async function GET(request: Request) {
     const search = sanitizeSearch(url.searchParams.get('search') ?? '');
     const tag = url.searchParams.get('tag');
 
-    // When filtering by tag, add an aliased INNER join on contact_tags
-    // used purely for the WHERE — the parent is kept only if it has the
-    // tag. The main `contact_tags(tags(*))` embed still returns the
-    // contact's FULL tag set for serialization. This filters in one
-    // bounded query (paged by limit+1) instead of pre-fetching an
-    // unbounded id list into an `.in(...)`.
-    const selectClause = tag
-      ? `${CONTACT_SELECT}, tag_filter:contact_tags!inner(tag_id)`
-      : CONTACT_SELECT;
-
-    let query = ctx.supabase
-      .from('contacts')
-      .select(selectClause)
-      .eq('account_id', ctx.accountId);
-
-    if (search) {
-      query = query.or(`name.ilike.*${search}*,phone.ilike.*${search}*`);
-    }
-
-    if (tag) {
-      query = query.eq('tag_filter.tag_id', tag);
-    }
-
-    query = query
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
-      .limit(limit + 1);
-
-    const kf = keysetFilter(cursor);
-    if (kf) query = query.or(kf);
-
-    const { data, error } = await query;
-    if (error) {
-      console.error('[api/v1/contacts] list error:', error);
-      return fail('internal', 'Failed to list contacts', 500);
-    }
-
-    // Cast via unknown: the conditional `selectClause` (with the
-    // tag_filter alias) is a runtime string, so supabase-js can't infer
-    // a row type from it.
-    const { items, nextCursor } = buildPage(
-      (data ?? []) as unknown as Array<{ created_at: string; id: string }>,
-      limit
+    const rows = await asService((db) =>
+      listContactsKeyset(db, ctx.accountId, { limit: limit + 1, cursor, search, tagId: tag })
     );
+
+    const { items, nextCursor } = buildPage(rows as Array<(typeof rows)[number] & { created_at: string }>, limit);
     return okList(
-      items.map((r) => serializeContact(r as Record<string, unknown>)),
+      items.map((r) => serializeContact(r as unknown as Record<string, unknown>)),
       nextCursor
     );
   } catch (err) {
@@ -110,23 +68,20 @@ export async function POST(request: Request) {
       return fail('bad_request', "'phone' is required", 400);
     }
 
-    const auditUserId = await resolveAuditUserId(ctx.supabase, ctx.accountId);
-
-    const { id, created } = await findOrCreateContact(
-      ctx.supabase,
-      ctx.accountId,
-      auditUserId,
-      {
+    const { id, created, auditUserId } = await asService(async (db) => {
+      const auditUserId = await resolveAuditUserId(db, ctx.accountId);
+      const result = await findOrCreateContact(db, ctx.accountId, auditUserId, {
         phone,
         name: typeof body.name === 'string' ? body.name : undefined,
         email: typeof body.email === 'string' ? body.email : undefined,
         company: typeof body.company === 'string' ? body.company : undefined,
-      }
-    );
+      });
+      return { ...result, auditUserId };
+    });
 
     if (Array.isArray(body.tags)) {
       await setContactTags(
-        ctx.supabase,
+        serviceRunner,
         ctx.accountId,
         auditUserId,
         id,
@@ -134,7 +89,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const contact = await getContactById(ctx.supabase, ctx.accountId, id);
+    const contact = await asService((db) => getContactById(db, ctx.accountId, id));
     return ok(contact, created ? 201 : 200);
   } catch (err) {
     if (err instanceof ContactError) {

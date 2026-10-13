@@ -13,6 +13,10 @@ vi.mock('@/lib/auth/account', () => ({
   ),
 }));
 
+// The fake transaction handed to repository code by asUser.
+const { fakeTx } = vi.hoisted(() => ({ fakeTx: { name: 'user-tx' } }));
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule(fakeTx));
+
 vi.mock('@/lib/contacts/tag-events', () => ({
   addContactTagAndDispatch: mocks.add,
 }));
@@ -31,7 +35,6 @@ vi.mock('@/lib/contacts/tag-write', () => ({
 import { DELETE, POST } from './route';
 
 const context = {
-  supabase: { name: 'scoped-client' },
   accountId: 'account-1',
   userId: 'user-1',
   role: 'agent',
@@ -64,7 +67,7 @@ describe('/api/contacts/[id]/tags', () => {
     expect(response.status).toBe(200);
     expect(mocks.requireRole).toHaveBeenCalledWith('agent');
     expect(mocks.add).toHaveBeenCalledWith({
-      db: context.supabase,
+      run: expect.any(Function),
       accountId: 'account-1',
       contactId: 'contact-1',
       tagId: 'tag-1',
@@ -86,7 +89,7 @@ describe('/api/contacts/[id]/tags', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mocks.remove).toHaveBeenCalledWith(context.supabase, {
+    expect(mocks.remove).toHaveBeenCalledWith(fakeTx, {
       accountId: 'account-1',
       contactId: 'contact-1',
       tagId: 'tag-1',

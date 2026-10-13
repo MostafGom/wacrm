@@ -16,6 +16,7 @@ import {
   resolveAuditUserId,
   ContactError,
 } from '@/lib/api/v1/contacts';
+import { asService, serviceRunner, sql } from '@/server/db';
 
 export async function GET(
   request: Request,
@@ -24,7 +25,7 @@ export async function GET(
   try {
     const ctx = await requireApiKey(request, 'contacts:read');
     const { id } = await params;
-    const contact = await getContactById(ctx.supabase, ctx.accountId, id);
+    const contact = await asService((db) => getContactById(db, ctx.accountId, id));
     if (!contact) return fail('not_found', 'Contact not found', 404);
     return ok(contact);
   } catch (err) {
@@ -49,14 +50,14 @@ export async function PATCH(
     }
 
     // Verify the contact is in this account before mutating anything.
-    const existing = await getContactById(ctx.supabase, ctx.accountId, id);
+    const existing = await asService((db) => getContactById(db, ctx.accountId, id));
     if (!existing) return fail('not_found', 'Contact not found', 404);
 
     // Build a partial update from the provided scalar fields. A field
     // is updated only when its key is PRESENT (so omitted fields are
     // untouched); `null` clears it, a string sets it, and any other
     // type is a 400 rather than a silently-ignored no-op.
-    const updates: Record<string, unknown> = {};
+    const updates: { name?: string | null; email?: string | null; company?: string | null } = {};
     for (const field of ['name', 'email', 'company'] as const) {
       if (!(field in body)) continue;
       const value = body[field];
@@ -68,22 +69,20 @@ export async function PATCH(
     }
 
     if (Object.keys(updates).length > 0) {
-      updates.updated_at = new Date().toISOString();
-      const { error } = await ctx.supabase
-        .from('contacts')
-        .update(updates)
-        .eq('id', id)
-        .eq('account_id', ctx.accountId);
-      if (error) {
-        console.error('[api/v1/contacts] update error:', error);
-        return fail('internal', 'Failed to update contact', 500);
-      }
+      await asService((db) =>
+        db
+          .updateTable('contacts')
+          .set({ ...updates, updated_at: sql<string>`now()` })
+          .where('id', '=', id)
+          .where('account_id', '=', ctx.accountId)
+          .execute()
+      );
     }
 
     if (Array.isArray(body.tags)) {
-      const auditUserId = await resolveAuditUserId(ctx.supabase, ctx.accountId);
+      const auditUserId = await asService((db) => resolveAuditUserId(db, ctx.accountId));
       await setContactTags(
-        ctx.supabase,
+        serviceRunner,
         ctx.accountId,
         auditUserId,
         id,
@@ -91,7 +90,7 @@ export async function PATCH(
       );
     }
 
-    const contact = await getContactById(ctx.supabase, ctx.accountId, id);
+    const contact = await asService((db) => getContactById(db, ctx.accountId, id));
     return ok(contact);
   } catch (err) {
     if (err instanceof ContactError) {

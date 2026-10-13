@@ -11,6 +11,7 @@ import {
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: () => 'plain-access-token',
 }));
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule());
 vi.mock('@/lib/api/v1/contacts', () => ({
   findOrCreateContact: vi.fn(async () => ({ id: 'c1' })),
 }));

@@ -2639,7 +2639,12 @@
       "nameTriggerRequired": "Nome e gatilho são obrigatórios"
     },
     "contacts": {
-      "tagIdRequired": "tag_id é obrigatório"
+      "tagIdRequired": "tag_id é obrigatório",
+      "duplicatePhone": "Já existe um contato com este número de telefone.",
+      "phoneInvalid": "'phone' deve ser um número internacional com + e código do país (ex.: +14155550123)",
+      "nameRequired": "name é obrigatório",
+      "contentRequired": "content é obrigatório",
+      "loadFailed": "Falha ao carregar contatos"
     },
     "flows": {
       "statusInvalid": "O status deve ser 'draft', 'active' ou 'archived'",

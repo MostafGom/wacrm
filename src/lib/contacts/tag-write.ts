@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@/lib/db';
+import type { Db } from '@/server/db';
 import { getT } from '@/lib/i18n/translate';
 
 const t = getT('LibErrors');
@@ -20,31 +20,28 @@ interface ContactTagWriteInput {
 }
 
 async function assertContactAndTagOwnership(
-  db: SupabaseClient,
+  db: Db,
   input: ContactTagWriteInput
 ): Promise<void> {
-  const [contactResult, tagResult] = await Promise.all([
+  const [contact, tag] = await Promise.all([
     db
-      .from('contacts')
+      .selectFrom('contacts')
       .select('id')
-      .eq('id', input.contactId)
-      .eq('account_id', input.accountId)
-      .maybeSingle(),
+      .where('id', '=', input.contactId)
+      .where('account_id', '=', input.accountId)
+      .executeTakeFirst(),
     db
-      .from('tags')
+      .selectFrom('tags')
       .select('id')
-      .eq('id', input.tagId)
-      .eq('account_id', input.accountId)
-      .maybeSingle(),
+      .where('id', '=', input.tagId)
+      .where('account_id', '=', input.accountId)
+      .executeTakeFirst(),
   ]);
 
-  if (contactResult.error || tagResult.error) {
-    throw new ContactTagWriteError(t('tags.verifyFailed'));
-  }
-  if (!contactResult.data) {
+  if (!contact) {
     throw new ContactTagWriteError(t('tags.contactNotFound'), 404);
   }
-  if (!tagResult.data) {
+  if (!tag) {
     throw new ContactTagWriteError(t('tags.tagNotFound'), 404);
   }
 }
@@ -52,44 +49,35 @@ async function assertContactAndTagOwnership(
 /**
  * Add a tag exactly once. The unique constraint on
  * (contact_id, tag_id) is the concurrency-safe source of truth: a
- * duplicate insert is a no-op and must not emit a tag_added event.
+ * duplicate insert is a no-op (ON CONFLICT DO NOTHING — a raised 23505
+ * would abort the surrounding transaction) and must not emit a
+ * tag_added event.
  */
 export async function addContactTagIfAbsent(
-  db: SupabaseClient,
+  db: Db,
   input: ContactTagWriteInput
 ): Promise<boolean> {
   await assertContactAndTagOwnership(db, input);
 
-  const { error } = await db
-    .from('contact_tags')
-    .insert({ contact_id: input.contactId, tag_id: input.tagId })
-    .select('id')
-    .maybeSingle();
+  const inserted = await db
+    .insertInto('contact_tags')
+    .values({ contact_id: input.contactId, tag_id: input.tagId })
+    .onConflict((oc) => oc.columns(['contact_id', 'tag_id']).doNothing())
+    .returning('id')
+    .executeTakeFirst();
 
-  if (error?.code === '23505') return false;
-  if (error) {
-    throw new ContactTagWriteError(
-      t('tags.addFailed', { message: error.message })
-    );
-  }
-  return true;
+  return Boolean(inserted);
 }
 
 export async function removeContactTag(
-  db: SupabaseClient,
+  db: Db,
   input: ContactTagWriteInput
 ): Promise<void> {
   await assertContactAndTagOwnership(db, input);
 
-  const { error } = await db
-    .from('contact_tags')
-    .delete()
-    .eq('contact_id', input.contactId)
-    .eq('tag_id', input.tagId);
-
-  if (error) {
-    throw new ContactTagWriteError(
-      t('tags.removeFailed', { message: error.message })
-    );
-  }
+  await db
+    .deleteFrom('contact_tags')
+    .where('contact_id', '=', input.contactId)
+    .where('tag_id', '=', input.tagId)
+    .execute();
 }

@@ -41,6 +41,7 @@ import {
 } from "./meta-send";
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import { addContactTagAndDispatch } from "@/lib/contacts/tag-events";
+import { asService, serviceRunner } from "@/server/db";
 import { removeContactTag } from "@/lib/contacts/tag-write";
 import {
   type CollectInputNodeConfig,
@@ -772,7 +773,7 @@ async function advanceFromNodeKey(
       try {
         if (cfg.mode === "add") {
           await addContactTagAndDispatch({
-            db,
+            run: serviceRunner,
             accountId: run.account_id,
             contactId: run.contact_id!,
             tagId: cfg.tag_id,
@@ -782,11 +783,13 @@ async function advanceFromNodeKey(
             },
           });
         } else {
-          await removeContactTag(db, {
-            accountId: run.account_id,
-            contactId: run.contact_id!,
-            tagId: cfg.tag_id,
-          });
+          await asService((tx) =>
+            removeContactTag(tx, {
+              accountId: run.account_id,
+              contactId: run.contact_id!,
+              tagId: cfg.tag_id,
+            }),
+          );
         }
       } catch (err) {
         // Non-fatal — log + advance. A tag-write failure shouldn't

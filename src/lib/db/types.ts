@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- results are untyped `any`, exactly like an untyped supabase-js client; callers cast to their own types. */
 // ============================================================
 // Public client surface — the shape the app codes against.
 //

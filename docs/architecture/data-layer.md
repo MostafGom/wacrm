@@ -109,3 +109,25 @@ After adding a migration:
 npm run db:migrate
 npm run db:types     # needs a superuser URL in MIGRATION_DATABASE_URL
 ```
+
+## Services that interleave I/O: `Runner`
+
+Some services mix database steps with side effects. For example, adding
+a tag then dispatching automations, or loading a template, calling
+Meta, then recording the message. These can't run inside one
+caller-owned transaction, so they take a `Runner` instead of a `Db`:
+
+```ts
+import { userRunner, serviceRunner, type Runner } from '@/server/db'
+
+await addContactTagAndDispatch({ run: userRunner(ctx.userId), accountId, contactId, tagId })
+await addContactTagAndDispatch({ run: serviceRunner, accountId, contactId, tagId })   // engines
+
+// inside the service
+const added = await run((db) => insertTagIfAbsent(db, …))   // commits here
+if (added) await runAutomationsForTrigger(…)                // sees the committed row
+```
+
+Inside a transaction, never "try the insert and catch 23505". A failed
+statement aborts the whole Postgres transaction. Use
+`onConflict(oc => oc.doNothing())` and check what came back.

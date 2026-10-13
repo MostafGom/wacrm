@@ -19,6 +19,7 @@ import type {
   AssignConversationStepConfig,
 } from '@/types'
 import { supabaseAdmin } from './admin-client'
+import { asService } from '@/server/db'
 import { addContactTagIfAbsent } from '@/lib/contacts/tag-write'
 import { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from '@/lib/contacts/tag-chain'
 import { engineSendText, engineSendTemplate, engineSendInteractive } from './meta-send'
@@ -716,11 +717,14 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
     case 'add_tag': {
       const cfg = step.step_config as TagStepConfig
       if (!args.contactId || !cfg.tag_id) throw new Error(tErr('needsContactAndTag', { step: 'add_tag' }))
-      const added = await addContactTagIfAbsent(db, {
-        accountId: args.automation.account_id,
-        contactId: args.contactId,
-        tagId: cfg.tag_id,
-      })
+      const contactId = args.contactId
+      const added = await asService((tx) =>
+        addContactTagIfAbsent(tx, {
+          accountId: args.automation.account_id,
+          contactId,
+          tagId: cfg.tag_id,
+        }),
+      )
       if (!added) return `tag ${cfg.tag_id} already present`
 
       const depth = getTagChainDepth(args.context)

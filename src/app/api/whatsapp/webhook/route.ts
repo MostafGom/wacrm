@@ -1,5 +1,6 @@
 import { NextResponse, after } from 'next/server'
 import { supabaseAdmin } from '@/lib/db/admin'
+import { asService } from '@/server/db'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
@@ -1303,11 +1304,8 @@ async function findOrCreateContact(
   // and CSV import, so all three paths agree on what "same number"
   // means (issue #212).
   if (!existingContact && identity.phone) {
-    existingContact = await findExistingContact(
-      supabaseAdmin(),
-      accountId,
-      identity.phone,
-    )
+    const phone = identity.phone
+    existingContact = await asService((db) => findExistingContact(db, accountId, phone))
   }
 
   if (existingContact) {
@@ -1369,11 +1367,8 @@ async function findOrCreateContact(
         : null
       if (raced) return { contact: raced, wasCreated: false }
       if (identity.phone) {
-        const racedByPhone = await findExistingContact(
-          supabaseAdmin(),
-          accountId,
-          identity.phone
-        )
+        const phone = identity.phone
+        const racedByPhone = await asService((db) => findExistingContact(db, accountId, phone))
         if (racedByPhone) return { contact: racedByPhone, wasCreated: false }
       }
     }

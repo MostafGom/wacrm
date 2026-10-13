@@ -241,6 +241,9 @@ vi.mock('@/lib/db/admin', () => ({
   }),
 }))
 
+// Repository calls go through asService; the repo modules are mocked.
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: () => 'plain-token',
   encrypt: (v: string) => v,

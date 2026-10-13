@@ -2639,7 +2639,12 @@
       "nameTriggerRequired": "이름과 트리거는 필수입니다"
     },
     "contacts": {
-      "tagIdRequired": "tag_id는 필수입니다"
+      "tagIdRequired": "tag_id는 필수입니다",
+      "duplicatePhone": "이 전화번호를 가진 연락처가 이미 있습니다.",
+      "phoneInvalid": "'phone'은 + 및 국가 코드가 포함된 국제 전화번호여야 합니다 (예: +14155550123)",
+      "nameRequired": "name은 필수입니다",
+      "contentRequired": "content는 필수입니다",
+      "loadFailed": "연락처를 불러오지 못했습니다"
     },
     "flows": {
       "statusInvalid": "상태는 'draft', 'active', 'archived' 중 하나여야 합니다",

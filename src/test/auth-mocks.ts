@@ -66,6 +66,8 @@ export function dbModule(fakeDb: unknown = {}) {
     asService: (fn: (db: unknown) => unknown) => run(fn),
     asAnon: (fn: (db: unknown) => unknown) => run(fn),
     withRole: (_role: string, _userId: string | null, fn: (db: unknown) => unknown) => run(fn),
+    userRunner: () => run,
+    serviceRunner: run,
     sql: Object.assign(() => ({ execute: async () => ({ rows: [] }) }), { raw: () => ({}) }),
   };
 }

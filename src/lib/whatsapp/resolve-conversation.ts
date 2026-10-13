@@ -24,6 +24,7 @@ import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
 import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
 import { SendMessageError } from '@/lib/whatsapp/send-message';
 import { resolveAuditUserId, ContactError } from '@/lib/api/v1/contacts';
+import { asService } from '@/server/db';
 
 export interface ResolvedConversation {
   conversationId: string;
@@ -79,7 +80,7 @@ export async function resolveConversationByPhone(
   // the callers already handle.
   let ownerUserId: string;
   try {
-    ownerUserId = await resolveAuditUserId(db, accountId);
+    ownerUserId = await asService((tx) => resolveAuditUserId(tx, accountId));
   } catch (err) {
     if (err instanceof ContactError) {
       throw new SendMessageError('db_error', err.message, err.status);
@@ -91,7 +92,7 @@ export async function resolveConversationByPhone(
   let contactId: string;
   let contactCreated = false;
 
-  const existing = await findExistingContact(db, accountId, sanitized);
+  const existing = await asService((tx) => findExistingContact(tx, accountId, sanitized));
   if (existing) {
     contactId = existing.id;
     if (name && name !== existing.name) {
@@ -116,7 +117,7 @@ export async function resolveConversationByPhone(
       // Lost a race against a concurrent inbound/API create — the
       // unique index (migration 022) rejected the duplicate. Re-resolve.
       if (isUniqueViolation(createErr)) {
-        const raced = await findExistingContact(db, accountId, sanitized);
+        const raced = await asService((tx) => findExistingContact(tx, accountId, sanitized));
         if (raced) {
           contactId = raced.id;
         } else {

@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@/lib/db';
+import type { Runner } from '@/server/db';
 
 import {
   runAutomationsForTrigger,
@@ -10,7 +10,8 @@ import { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from './tag-chain';
 export { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from './tag-chain';
 
 interface AddContactTagAndDispatchInput {
-  db: SupabaseClient;
+  /** How to run the insert (userRunner(userId) / serviceRunner). It commits before dispatch. */
+  run: Runner;
   accountId: string;
   contactId: string;
   tagId: string;
@@ -30,11 +31,13 @@ export interface AddContactTagResult {
 export async function addContactTagAndDispatch(
   input: AddContactTagAndDispatchInput
 ): Promise<AddContactTagResult> {
-  const added = await addContactTagIfAbsent(input.db, {
-    accountId: input.accountId,
-    contactId: input.contactId,
-    tagId: input.tagId,
-  });
+  const added = await input.run((db) =>
+    addContactTagIfAbsent(db, {
+      accountId: input.accountId,
+      contactId: input.contactId,
+      tagId: input.tagId,
+    })
+  );
 
   if (!added) return { added: false, dispatched: false, reason: 'duplicate' };
 

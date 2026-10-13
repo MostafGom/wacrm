@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SupabaseClient } from "@/lib/db";
+import type { Db } from "@/server/db";
 import {
   dedupeByPhone,
   findExistingContact,
@@ -82,15 +82,16 @@ describe("dedupeByPhone", () => {
 });
 
 describe("findExistingContact", () => {
-  // Minimal SupabaseClient stub: resolves the .from().select().eq().like()
-  // chain to a fixed candidate set.
-  function stubDb(rows: Array<{ id: string; phone: string }>): SupabaseClient {
+  // Minimal Kysely stub: resolves the selectFrom().selectAll().where()…
+  // .execute() chain to a fixed candidate set (the SQL suffix pre-filter
+  // itself is covered by the repos integration tests).
+  function stubDb(rows: Array<{ id: string; phone: string }>): Db {
     const builder = {
-      select: () => builder,
-      eq: () => builder,
-      like: () => Promise.resolve({ data: rows, error: null }),
+      selectAll: () => builder,
+      where: () => builder,
+      execute: () => Promise.resolve(rows),
     };
-    return { from: () => builder } as unknown as SupabaseClient;
+    return { selectFrom: () => builder } as unknown as Db;
   }
 
   it("returns a trunk-variant match via phonesMatch", async () => {

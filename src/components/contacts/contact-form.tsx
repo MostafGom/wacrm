@@ -1,17 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { addContactTag, deleteContactTag } from '@/lib/contacts/tag-api';
 import { toast } from 'sonner';
-import type { Contact, Tag, ContactTag } from '@/types';
+import type { Contact, Tag } from '@/types';
+import type { ExistingContact } from '@/lib/contacts/dedupe';
 import {
-  findExistingContact,
-  isExactMatch,
-  isUniqueViolation,
-  type ExistingContact,
-} from '@/lib/contacts/dedupe';
+  createContact,
+  findDuplicate,
+  listTags,
+  updateContact,
+} from '@/lib/contacts/contacts-api';
 import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
 import {
   Dialog,
@@ -32,7 +32,8 @@ interface ContactFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   contact?: Contact | null;
-  contactTags?: ContactTag[];
+  /** Tag ids the contact currently has (edit mode). */
+  contactTagIds?: string[];
   onSaved: () => void;
   /** Open an existing contact's detail view — used by the duplicate
    *  notice to jump to the contact that already owns this number. */
@@ -43,12 +44,11 @@ export function ContactForm({
   open,
   onOpenChange,
   contact,
-  contactTags = [],
+  contactTagIds = [],
   onSaved,
   onViewExisting,
 }: ContactFormProps) {
   const t = useTranslations('Contacts.form');
-  const supabase = createClient();
   const { accountId } = useAuth();
   const isEdit = !!contact;
 
@@ -77,7 +77,7 @@ export function ContactForm({
       setPhone(contact?.phone ?? '');
       setEmail(contact?.email ?? '');
       setCompany(contact?.company ?? '');
-      setSelectedTagIds(contactTags.map((ct) => ct.tag_id));
+      setSelectedTagIds(contactTagIds);
       setDupMatch(null);
       fetchTags();
     }
@@ -94,11 +94,9 @@ export function ContactForm({
     }
     setCheckingDup(true);
     try {
-      const existing = await findExistingContact(supabase, accountId, value);
+      const { data } = await findDuplicate(value);
       setDupMatch(
-        existing
-          ? { contact: existing, exact: isExactMatch(existing, value) }
-          : null,
+        data?.existing ? { contact: data.existing, exact: data.exact } : null,
       );
     } finally {
       setCheckingDup(false);
@@ -107,11 +105,8 @@ export function ContactForm({
 
   async function fetchTags() {
     setLoadingTags(true);
-    const { data } = await supabase
-      .from('tags')
-      .select('*')
-      .order('name');
-    if (data) setTags(data);
+    const { data } = await listTags();
+    if (data) setTags(data.tags);
     setLoadingTags(false);
   }
 
@@ -153,47 +148,38 @@ export function ContactForm({
     setSaving(true);
 
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const user = session?.user;
-      if (!user) throw new Error(t('notAuthenticated'));
       if (!accountId) throw new Error(t('notLinkedToAccount'));
 
       let contactId = contact?.id;
+      const fields = {
+        name: name.trim() || null,
+        phone: phone.trim(),
+        email: email.trim() || null,
+        company: company.trim() || null,
+      };
 
-      if (isEdit && contactId) {
-        const { error } = await supabase
-          .from('contacts')
-          .update({
-            name: name.trim() || null,
-            phone: phone.trim(),
-            email: email.trim() || null,
-            company: company.trim() || null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', contactId);
-        if (error) throw error;
-      } else {
-        const { data, error } = await supabase
-          .from('contacts')
-          .insert({
-            user_id: user.id,
-            account_id: accountId,
-            name: name.trim() || null,
-            phone: phone.trim(),
-            email: email.trim() || null,
-            company: company.trim() || null,
-          })
-          .select('id')
-          .single();
-        if (error) throw error;
-        contactId = data.id;
+      const { data, error } =
+        isEdit && contactId
+          ? await updateContact(contactId, fields)
+          : await createContact(fields);
+      if (error) {
+        // The unique index (migration 022) rejects a duplicate phone
+        // that slipped past the on-blur check (race, or a format that
+        // normalizes equal). Surface it as the friendly duplicate notice
+        // and, for new contacts, point the user at the existing record.
+        if (error.code === 'duplicate_phone') {
+          toast.error(t('toastConflict'));
+          const existing = (error.body as { existing?: ExistingContact | null } | undefined)?.existing;
+          if (!isEdit && existing) setDupMatch({ contact: existing, exact: true });
+          return;
+        }
+        throw new Error(error.message);
       }
+      contactId = data.contact.id;
 
       // Sync tags
       if (contactId) {
-        const existingTagIds = new Set(contactTags.map((tag) => tag.tag_id));
+        const existingTagIds = new Set(contactTagIds);
         const desiredTagIds = new Set(selectedTagIds);
         const toRemove = [...existingTagIds].filter((id) => !desiredTagIds.has(id));
         const toAdd = [...desiredTagIds].filter((id) => !existingTagIds.has(id));
@@ -210,22 +196,6 @@ export function ContactForm({
       onOpenChange(false);
       onSaved();
     } catch (err: unknown) {
-      // The unique index (migration 022) rejects a duplicate phone that
-      // slipped past the on-blur check (race, or a format that
-      // normalizes equal). Surface it as the friendly duplicate notice
-      // and, for new contacts, point the user at the existing record.
-      if (isUniqueViolation(err)) {
-        toast.error(t('toastConflict'));
-        if (!isEdit && accountId) {
-          const existing = await findExistingContact(
-            supabase,
-            accountId,
-            phone.trim(),
-          );
-          if (existing) setDupMatch({ contact: existing, exact: true });
-        }
-        return;
-      }
       const message = err instanceof Error ? err.message : t('toastError');
       toast.error(message);
     } finally {
