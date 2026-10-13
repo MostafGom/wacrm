@@ -21,6 +21,8 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limit';
 import { getT } from '@/lib/i18n/translate';
+import { asUser } from '@/server/db';
+import { revokeApiKey } from '@/server/repos/api-keys';
 
 const t = getT('Api');
 
@@ -43,23 +45,17 @@ export async function DELETE(
     // never revoke another account's key by guessing a UUID. (RLS
     // already enforces this; the explicit filter is belt-and-braces
     // and makes the "0 rows updated → 404" path precise.)
-    const { data, error } = await ctx.supabase
-      .from('api_keys')
-      .update({ revoked_at: new Date().toISOString() })
-      .eq('id', id)
-      .eq('account_id', ctx.accountId)
-      .is('revoked_at', null)
-      .select('id')
-      .maybeSingle();
-
-    if (error) {
+    let revoked: boolean;
+    try {
+      revoked = await asUser(ctx.userId, (db) => revokeApiKey(db, ctx.accountId, id));
+    } catch (error) {
       console.error('[DELETE /api/account/api-keys/[id]] error:', error);
       return NextResponse.json(
         { error: t('account.apiKeys.revokeFailed') },
         { status: 500 }
       );
     }
-    if (!data) {
+    if (!revoked) {
       // Either no such key in this account, or it was already revoked.
       return NextResponse.json(
         { error: t('account.apiKeys.notFoundOrRevoked') },

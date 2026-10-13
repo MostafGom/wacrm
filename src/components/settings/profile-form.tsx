@@ -4,7 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2, Upload, Trash2, Mail, CircleAlert } from 'lucide-react';
 
-import { createClient } from '@/lib/supabase/client';
+import { getAuthClient } from '@/lib/auth/client';
+import { getBrowserStorage } from '@/lib/storage/client';
+import { updateProfile } from '@/lib/settings/settings-api';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,7 +37,6 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function ProfileForm() {
   const t = useTranslations('Settings.profile');
   const { user, profile, refreshProfile } = useAuth();
-  const supabase = createClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [fullName, setFullName] = useState('');
@@ -122,7 +123,8 @@ export function ProfileForm() {
         const ext =
           pendingAvatar.name.split('.').pop()?.toLowerCase() || 'png';
         const path = `${user.id}/avatar-${Date.now()}.${ext}`;
-        const { error: uploadError } = await supabase.storage
+        const storage = getBrowserStorage();
+        const { error: uploadError } = await storage
           .from('avatars')
           .upload(path, pendingAvatar, {
             cacheControl: '3600',
@@ -134,32 +136,28 @@ export function ProfileForm() {
         }
         const {
           data: { publicUrl },
-        } = supabase.storage.from('avatars').getPublicUrl(path);
+        } = storage.from('avatars').getPublicUrl(path);
         nextAvatarUrl = publicUrl;
       } else if (removeAvatar) {
         nextAvatarUrl = null;
       }
 
       // Persist name + avatar to profiles.
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update({
-          full_name: trimmedName,
-          avatar_url: nextAvatarUrl,
-        })
-        .eq('user_id', user.id);
+      const { error: updateError } = await updateProfile({
+        full_name: trimmedName,
+        avatar_url: nextAvatarUrl,
+      });
       if (updateError) {
         throw new Error(t('saveFailed', { message: updateError.message }));
       }
 
-      // Email change goes through Supabase Auth, which emails a
-      // confirmation to both the old and new addresses. We don't
-      // touch profiles.email — Supabase will push the change there
-      // after the user clicks the link (handled by the handle_new_user
-      // trigger pattern in production deployments).
+      // Email change goes through the auth API, which (with SMTP
+      // configured) emails a confirmation link first. We don't touch
+      // profiles.email here — a trigger on auth.users keeps it in step
+      // once the change is applied.
       let emailSent = false;
       if (trimmedEmail.toLowerCase() !== profile.email.toLowerCase()) {
-        const { data: updated, error: emailError } = await supabase.auth.updateUser({
+        const { data: updated, error: emailError } = await getAuthClient().updateUser({
           email: trimmedEmail,
         });
         if (emailError) {

@@ -18,31 +18,21 @@ import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
 import { canManageMembers, isAccountRole } from "@/lib/auth/roles";
 import type { AccountMember } from "@/types";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { listMembers } from "@/server/repos/members";
 
 const t = getT("Api");
-
-interface ProfileRow {
-  user_id: string;
-  full_name: string | null;
-  email: string | null;
-  avatar_url: string | null;
-  account_role: string;
-  created_at: string;
-}
 
 export async function GET() {
   try {
     const ctx = await getCurrentAccount();
 
-    // RLS on profiles allows reading any row whose account matches
-    // the caller's, so this query is naturally account-scoped.
-    const { data, error } = await ctx.supabase
-      .from("profiles")
-      .select("user_id, full_name, email, avatar_url, account_role, created_at")
-      .eq("account_id", ctx.accountId)
-      .order("created_at", { ascending: true });
-
-    if (error) {
+    // Explicitly account-scoped; RLS on profiles (rows of the
+    // caller's account only) backs it up.
+    let data;
+    try {
+      data = await asUser(ctx.userId, (db) => listMembers(db, ctx.accountId));
+    } catch (error) {
       console.error("[GET /api/account/members] fetch error:", error);
       return NextResponse.json(
         { error: t('account.members.loadFailed') },
@@ -52,19 +42,21 @@ export async function GET() {
 
     const canSeeEmails = canManageMembers(ctx.role);
 
-    const members: AccountMember[] = (data as ProfileRow[]).flatMap((row) => {
+    const members: AccountMember[] = data.flatMap((row) => {
       // Defensive: the DB enum should never let an unknown role
       // through, but if a migration ever broadens the enum without
       // updating TS, skip the row rather than crash the page.
-      if (!isAccountRole(row.account_role)) return [];
+      const role: unknown = row.account_role;
+      if (!isAccountRole(role)) return [];
       return [
         {
           user_id: row.user_id,
           full_name: row.full_name ?? "",
           email: canSeeEmails ? row.email : null,
           avatar_url: row.avatar_url,
-          role: row.account_role,
-          joined_at: row.created_at,
+          role,
+          // Column defaults to now(); never null in practice.
+          joined_at: row.created_at as string,
         },
       ];
     });

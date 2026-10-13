@@ -33,6 +33,8 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { createInvitation, listPendingInvitations } from "@/server/repos/invitations";
 
 const t = getT("Api");
 
@@ -143,17 +145,10 @@ export async function GET() {
   try {
     const ctx = await requireRole("admin");
 
-    const { data, error } = await ctx.supabase
-      .from("account_invitations")
-      .select(
-        "id, role, label, created_by_user_id, created_at, expires_at, accepted_at, accepted_by_user_id",
-      )
-      .eq("account_id", ctx.accountId)
-      .is("accepted_at", null)
-      .gt("expires_at", new Date().toISOString())
-      .order("created_at", { ascending: false });
-
-    if (error) {
+    let invitations;
+    try {
+      invitations = await asUser(ctx.userId, (db) => listPendingInvitations(db, ctx.accountId));
+    } catch (error) {
       console.error("[GET /api/account/invitations] fetch error:", error);
       return NextResponse.json(
         { error: t('account.invitations.loadFailed') },
@@ -161,7 +156,7 @@ export async function GET() {
       );
     }
 
-    return NextResponse.json({ invitations: data ?? [] });
+    return NextResponse.json({ invitations });
   } catch (err) {
     return toErrorResponse(err);
   }
@@ -219,20 +214,19 @@ export async function POST(request: Request) {
 
     const { token, hash } = generateInviteToken();
 
-    const { data, error } = await ctx.supabase
-      .from("account_invitations")
-      .insert({
-        account_id: ctx.accountId,
-        token_hash: hash,
-        role,
-        created_by_user_id: ctx.userId,
-        label,
-        expires_at: expiresAt.toISOString(),
-      })
-      .select("id, role, label, expires_at, created_at")
-      .single();
-
-    if (error || !data) {
+    let data;
+    try {
+      data = await asUser(ctx.userId, (db) =>
+        createInvitation(db, {
+          account_id: ctx.accountId,
+          token_hash: hash,
+          role,
+          created_by_user_id: ctx.userId,
+          label,
+          expires_at: expiresAt.toISOString(),
+        }),
+      );
+    } catch (error) {
       console.error("[POST /api/account/invitations] insert error:", error);
       return NextResponse.json(
         { error: t('account.invitations.createFailed') },

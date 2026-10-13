@@ -1,10 +1,10 @@
 // ============================================================
 // DELETE /api/account/invitations/[id]
 //
-// Admin+. Revokes a pending invitation by id. RLS on
-// `account_invitations` already restricts the DELETE to admins
-// of the inviting account; we lean on it and skip the explicit
-// ownership check.
+// Admin+. Revokes a pending invitation by id. The delete is scoped
+// to the caller's account explicitly, and RLS on
+// `account_invitations` restricts it to admins of the inviting
+// account as a second line of defense.
 //
 // We intentionally delete the row outright rather than soft-
 // deleting (a "revoked_at" flag). Once revoked, an invite is
@@ -22,6 +22,8 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { deleteInvitation } from "@/server/repos/invitations";
 
 const t = getT("Api");
 
@@ -40,18 +42,13 @@ export async function DELETE(
 
     const { id } = await params;
 
-    // No `eq('account_id', ctx.accountId)` — the RLS policy
-    // (`is_account_member(account_id, 'admin')`) already scopes
-    // the DELETE to invites in the caller's account. Adding the
-    // filter would be redundant; omitting it surfaces a
-    // cross-account attempt as a silent 0-row delete (which is
-    // exactly what we want for a revocation endpoint).
-    const { error, count } = await ctx.supabase
-      .from("account_invitations")
-      .delete({ count: "exact" })
-      .eq("id", id);
-
-    if (error) {
+    // Scoped by account_id (and by RLS): a cross-account attempt is
+    // a silent 0-row delete, which is exactly what we want for a
+    // revocation endpoint.
+    let deleted: boolean;
+    try {
+      deleted = await asUser(ctx.userId, (db) => deleteInvitation(db, ctx.accountId, id));
+    } catch (error) {
       console.error("[DELETE /api/account/invitations/[id]] error:", error);
       return NextResponse.json(
         { error: t('account.invitations.revokeFailed') },
@@ -59,7 +56,7 @@ export async function DELETE(
       );
     }
 
-    if (count === 0) {
+    if (!deleted) {
       // Either the id doesn't exist or RLS hid it (different
       // account). 404 either way — surfacing "exists but not
       // yours" would leak existence.

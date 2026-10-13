@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { supabaseAdmin } from '@/lib/db/admin'
+import { getServerSession } from '@/lib/auth/server-session'
+import { asService, asUser } from '@/server/db'
+import { getProfileByUserId } from '@/server/repos/profiles'
+import {
+  deleteWhatsAppConfig,
+  getExistingConfigForSave,
+  getWhatsAppCredentials,
+  insertWhatsAppConfig,
+  isPhoneNumberClaimedElsewhere,
+  updateWhatsAppConfig,
+} from '@/server/repos/whatsapp-config'
 import {
   getSubscribedApps,
   listWabaPhoneNumbers,
@@ -36,17 +45,13 @@ const t = getT('Api')
  * Returns null if the user has no profile or no account; callers
  * should treat that the same as "not connected".
  */
-async function resolveAccountId(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  userId: string,
-): Promise<string | null> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('account_id')
-    .eq('user_id', userId)
-    .maybeSingle()
-  if (error || !data?.account_id) return null
-  return data.account_id as string
+async function resolveAccountId(userId: string): Promise<string | null> {
+  try {
+    const profile = await asUser(userId, (db) => getProfileByUserId(db, userId))
+    return profile?.account_id ?? null
+  } catch {
+    return null
+  }
 }
 
 
@@ -86,18 +91,13 @@ function metaFailure(err: unknown, step: MetaConnectStep, ctx: MetaErrorContext)
  */
 export async function GET() {
   try {
-    const supabase = await createClient()
-
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-
-    if (authError || !user) {
+    const session = await getServerSession()
+    if (!session) {
       return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
     }
+    const user = session.user
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(user.id)
     if (!accountId) {
       return NextResponse.json(
         {
@@ -109,13 +109,10 @@ export async function GET() {
       )
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, waba_id, access_token, status')
-      .eq('account_id', accountId)
-      .maybeSingle()
-
-    if (configError) {
+    let config
+    try {
+      config = await asUser(user.id, (db) => getWhatsAppCredentials(db, accountId))
+    } catch (configError) {
       console.error('Error fetching whatsapp_config:', configError)
       return NextResponse.json(
         { connected: false, reason: 'db_error', message: t('whatsappConfig.fetchFailed') },
@@ -235,18 +232,13 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient()
-
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-
-    if (authError || !user) {
+    const session = await getServerSession()
+    if (!session) {
       return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
     }
+    const user = session.user
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(user.id)
     if (!accountId) {
       return NextResponse.json(
         { error: t('common.profileNotLinked') },
@@ -306,14 +298,13 @@ export async function POST(request: Request) {
     // inbound message. See issue #136. Post-multi-user we key on
     // account_id (not user_id) since teammates inside the same account
     // all share one config; the conflict is between accounts.
-    const { data: claimed, error: claimedError } = await supabaseAdmin()
-      .from('whatsapp_config')
-      .select('account_id')
-      .eq('phone_number_id', phone_number_id)
-      .neq('account_id', accountId)
-      .maybeSingle()
-
-    if (claimedError) {
+    //
+    // Cross-account by nature (RLS would hide the other account's row),
+    // so this one lookup runs as the service role.
+    let claimed: boolean
+    try {
+      claimed = await asService((db) => isPhoneNumberClaimedElsewhere(db, phone_number_id, accountId))
+    } catch (claimedError) {
       console.error('Error checking phone_number_id ownership:', claimedError)
       return NextResponse.json(
         { error: t('whatsappConfig.validateFailed') },
@@ -381,11 +372,9 @@ export async function POST(request: Request) {
     // around), and we need the stored verify_token — the settings form
     // never shows it, so a save that leaves the field blank must keep it
     // rather than null it out.
-    const { data: existing } = await supabase
-      .from('whatsapp_config')
-      .select('id, registered_at, phone_number_id, verify_token')
-      .eq('account_id', accountId)
-      .maybeSingle()
+    const existing = await asUser(user.id, (db) => getExistingConfigForSave(db, accountId)).catch(
+      () => undefined,
+    )
 
     // Encrypt sensitive tokens before storing
     let encryptedAccessToken: string
@@ -502,12 +491,9 @@ export async function POST(request: Request) {
     }
 
     if (existing) {
-      const { error: updateError } = await supabase
-        .from('whatsapp_config')
-        .update(baseRow)
-        .eq('account_id', accountId)
-
-      if (updateError) {
+      try {
+        await asUser(user.id, (db) => updateWhatsAppConfig(db, accountId, baseRow))
+      } catch (updateError) {
         console.error('Error updating whatsapp_config:', updateError)
         return NextResponse.json(
           { error: t('whatsappConfig.updateFailed') },
@@ -519,15 +505,15 @@ export async function POST(request: Request) {
       // (NOT NULL post-017, UNIQUE so duplicates trip the constraint
       // up-front), `user_id` is the audit column identifying which
       // member of the account saved the config.
-      const { error: insertError } = await supabase
-        .from('whatsapp_config')
-        .insert({
-          account_id: accountId,
-          user_id: user.id,
-          ...baseRow,
-        })
-
-      if (insertError) {
+      try {
+        await asUser(user.id, (db) =>
+          insertWhatsAppConfig(db, {
+            account_id: accountId,
+            user_id: user.id,
+            ...baseRow,
+          }),
+        )
+      } catch (insertError) {
         console.error('Error inserting whatsapp_config:', insertError)
         return NextResponse.json(
           { error: t('whatsappConfig.saveFailed') },
@@ -577,18 +563,13 @@ export async function POST(request: Request) {
  */
 export async function DELETE() {
   try {
-    const supabase = await createClient()
-
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-
-    if (authError || !user) {
+    const session = await getServerSession()
+    if (!session) {
       return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
     }
+    const user = session.user
 
-    const accountId = await resolveAccountId(supabase, user.id)
+    const accountId = await resolveAccountId(user.id)
     if (!accountId) {
       return NextResponse.json(
         { error: t('common.profileNotLinked') },
@@ -596,12 +577,9 @@ export async function DELETE() {
       )
     }
 
-    const { error: deleteError } = await supabase
-      .from('whatsapp_config')
-      .delete()
-      .eq('account_id', accountId)
-
-    if (deleteError) {
+    try {
+      await asUser(user.id, (db) => deleteWhatsAppConfig(db, accountId))
+    } catch (deleteError) {
       console.error('Error deleting whatsapp_config:', deleteError)
       return NextResponse.json(
         { error: t('whatsappConfig.deleteFailed') },

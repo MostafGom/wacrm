@@ -11,10 +11,16 @@ import { requireApiKey } from '@/lib/auth/api-context';
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { normalizeEvents } from '@/lib/webhooks/events';
 import {
-  WEBHOOK_PUBLIC_COLUMNS,
   serializeWebhookEndpoint,
   normalizeWebhookUrl,
 } from '@/lib/webhooks/endpoints';
+import { asService } from '@/server/db';
+import {
+  deleteWebhookEndpoint,
+  getWebhookEndpoint,
+  updateWebhookEndpoint,
+  type WebhookEndpointUpdate,
+} from '@/server/repos/webhook-endpoints';
 
 export async function GET(
   request: Request,
@@ -24,20 +30,16 @@ export async function GET(
     const ctx = await requireApiKey(request, 'webhooks:manage');
     const { id } = await params;
 
-    const { data, error } = await ctx.supabase
-      .from('webhook_endpoints')
-      .select(WEBHOOK_PUBLIC_COLUMNS)
-      .eq('id', id)
-      .eq('account_id', ctx.accountId)
-      .maybeSingle();
-
-    if (error) {
+    let data;
+    try {
+      data = await asService((db) => getWebhookEndpoint(db, ctx.accountId, id));
+    } catch (error) {
       console.error('[api/v1/webhooks] read error:', error);
       return fail('internal', 'Failed to read webhook', 500);
     }
     if (!data) return fail('not_found', 'Webhook not found', 404);
 
-    return ok(serializeWebhookEndpoint(data as Record<string, unknown>));
+    return ok(serializeWebhookEndpoint(data));
   } catch (err) {
     return toApiErrorResponse(err);
   }
@@ -59,7 +61,7 @@ export async function PATCH(
       return fail('bad_request', 'Request body must be a JSON object', 400);
     }
 
-    const updates: Record<string, unknown> = {};
+    const updates: WebhookEndpointUpdate = {};
 
     if ('url' in body) {
       const url = normalizeWebhookUrl(body.url);
@@ -97,21 +99,16 @@ export async function PATCH(
 
     // Scope the update by account_id so a foreign id touches nothing;
     // the returned row (null when unmatched) drives the 404.
-    const { data, error } = await ctx.supabase
-      .from('webhook_endpoints')
-      .update(updates)
-      .eq('id', id)
-      .eq('account_id', ctx.accountId)
-      .select(WEBHOOK_PUBLIC_COLUMNS)
-      .maybeSingle();
-
-    if (error) {
+    let data;
+    try {
+      data = await asService((db) => updateWebhookEndpoint(db, ctx.accountId, id, updates));
+    } catch (error) {
       console.error('[api/v1/webhooks] update error:', error);
       return fail('internal', 'Failed to update webhook', 500);
     }
     if (!data) return fail('not_found', 'Webhook not found', 404);
 
-    return ok(serializeWebhookEndpoint(data as Record<string, unknown>));
+    return ok(serializeWebhookEndpoint(data));
   } catch (err) {
     return toApiErrorResponse(err);
   }
@@ -125,21 +122,16 @@ export async function DELETE(
     const ctx = await requireApiKey(request, 'webhooks:manage');
     const { id } = await params;
 
-    const { data, error } = await ctx.supabase
-      .from('webhook_endpoints')
-      .delete()
-      .eq('id', id)
-      .eq('account_id', ctx.accountId)
-      .select('id')
-      .maybeSingle();
-
-    if (error) {
+    let deletedId: string | undefined;
+    try {
+      deletedId = await asService((db) => deleteWebhookEndpoint(db, ctx.accountId, id));
+    } catch (error) {
       console.error('[api/v1/webhooks] delete error:', error);
       return fail('internal', 'Failed to delete webhook', 500);
     }
-    if (!data) return fail('not_found', 'Webhook not found', 404);
+    if (!deletedId) return fail('not_found', 'Webhook not found', 404);
 
-    return ok({ id: data.id, deleted: true });
+    return ok({ id: deletedId, deleted: true });
   } catch (err) {
     return toApiErrorResponse(err);
   }

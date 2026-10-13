@@ -1,26 +1,21 @@
 import { NextResponse } from 'next/server'
 import { getCurrentAccount, requireRole, toErrorResponse } from '@/lib/auth/account'
-import { supabaseAdmin } from '@/lib/automations/admin-client'
+import { asUser } from '@/server/db'
+import { createQuickReply, listQuickReplies } from '@/server/repos/quick-replies'
 import { validateInteractivePayload } from '@/lib/whatsapp/interactive'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('Api')
 
 // Quick replies — reusable snippets (plain text or a saved interactive
-// message) shared across the account. GET lists; POST creates. Mirrors
-// the automations route: RLS-scoped read via the user client, service-
-// role write after an explicit role check.
+// message) shared across the account. GET lists (any member); POST
+// creates (agent+, same as the quick_replies_insert RLS policy).
 
 export async function GET() {
   try {
-    const { supabase } = await getCurrentAccount()
-    // RLS (quick_replies_select) scopes to the caller's account.
-    const { data, error } = await supabase
-      .from('quick_replies')
-      .select('*')
-      .order('created_at', { ascending: false })
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json({ quick_replies: data ?? [] })
+    const ctx = await getCurrentAccount()
+    const quickReplies = await asUser(ctx.userId, (db) => listQuickReplies(db, ctx.accountId))
+    return NextResponse.json({ quick_replies: quickReplies })
   } catch (err) {
     return toErrorResponse(err)
   }
@@ -63,21 +58,19 @@ export async function POST(request: Request) {
     content_text = text
   }
 
-  const { data, error } = await supabaseAdmin()
-    .from('quick_replies')
-    .insert({
-      account_id: ctx.accountId,
-      user_id: ctx.userId,
-      title,
-      kind,
-      content_text,
-      interactive_payload,
-    })
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const quickReply = await asUser(ctx.userId, (db) =>
+      createQuickReply(db, {
+        account_id: ctx.accountId,
+        user_id: ctx.userId,
+        title,
+        kind,
+        content_text,
+        interactive_payload,
+      }),
+    )
+    return NextResponse.json({ quick_reply: quickReply }, { status: 201 })
+  } catch (err) {
+    return toErrorResponse(err)
   }
-  return NextResponse.json({ quick_reply: data }, { status: 201 })
 }

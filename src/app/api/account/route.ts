@@ -24,6 +24,8 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { renameAccount } from "@/server/repos/account";
 
 const t = getT("Api");
 
@@ -84,15 +86,15 @@ export async function PATCH(request: Request) {
     // RLS allows this UPDATE because accounts_update requires
     // `is_account_member(id, 'admin')`, and requireRole already
     // guaranteed the caller is admin+.
-    const { data, error } = await ctx.supabase
-      .from("accounts")
-      .update({ name })
-      .eq("id", ctx.accountId)
-      .select("id, name")
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await asUser(ctx.userId, (db) => renameAccount(db, ctx.accountId, name));
+    } catch (error) {
       console.error("[PATCH /api/account] update error:", error);
+      data = undefined;
+    }
+
+    if (!data) {
       return NextResponse.json(
         { error: t('account.updateFailed') },
         { status: 500 },

@@ -18,7 +18,6 @@
 // ============================================================
 
 import { NextResponse } from "next/server";
-import type { PostgrestError } from "@/lib/db";
 
 import { hashInviteToken } from "@/lib/auth/invitations";
 import {
@@ -26,8 +25,11 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from "@/lib/rate-limit";
-import { createClient } from "@/lib/supabase/server";
+import { getServerSession } from "@/lib/auth/server-session";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { isInvalidParameter, isPermissionDenied, isUniqueViolation, pgMessage } from "@/server/db/errors";
+import { redeemInvitation } from "@/server/repos/invitations";
 
 const t = getT("Api");
 
@@ -39,15 +41,15 @@ function getClientIp(request: Request): string {
   return "unknown";
 }
 
-function rpcErrorToResponse(err: PostgrestError): NextResponse {
-  if (err.code === "42501") {
-    return NextResponse.json({ error: err.message }, { status: 401 });
+function rpcErrorToResponse(err: unknown): NextResponse {
+  if (isPermissionDenied(err)) {
+    return NextResponse.json({ error: pgMessage(err) }, { status: 401 });
   }
-  if (err.code === "22023") {
-    return NextResponse.json({ error: err.message }, { status: 400 });
+  if (isInvalidParameter(err)) {
+    return NextResponse.json({ error: pgMessage(err) }, { status: 400 });
   }
-  if (err.code === "23505") {
-    return NextResponse.json({ error: err.message }, { status: 409 });
+  if (isUniqueViolation(err)) {
+    return NextResponse.json({ error: pgMessage(err) }, { status: 409 });
   }
   console.error("[redeem] unexpected RPC error:", err);
   return NextResponse.json(
@@ -72,23 +74,20 @@ export async function POST(
     );
   }
 
-  const supabase = await createClient();
-
   // The RPC checks `auth.uid()` itself, but failing fast here
-  // gives a cleaner 401 without a Supabase round trip on the
+  // gives a cleaner 401 without a database round trip on the
   // common "user clicked the link before logging in" path.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
+  const session = await getServerSession();
+  if (!session) {
     return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 });
   }
 
-  const { data: accountId, error } = await supabase.rpc("redeem_invitation", {
-    p_token_hash: hashInviteToken(token),
-  });
-
-  if (error) return rpcErrorToResponse(error);
+  let accountId: string | null;
+  try {
+    accountId = await asUser(session.user.id, (db) => redeemInvitation(db, hashInviteToken(token)));
+  } catch (error) {
+    return rpcErrorToResponse(error);
+  }
 
   return NextResponse.json({ ok: true, accountId });
 }
