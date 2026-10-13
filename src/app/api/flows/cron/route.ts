@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto'
 import { NextResponse } from 'next/server'
-import { supabaseAdmin } from '@/lib/flows/admin-client'
 import { resolveFallbackPolicy } from '@/lib/flows/fallback'
+import { asService } from '@/server/db'
+import { listActiveRunsForSweep, timeOutRun } from '@/server/repos/flow-runs'
 
 /**
  * Sweep abandoned active flow runs.
@@ -25,6 +26,9 @@ import { resolveFallbackPolicy } from '@/lib/flows/fallback'
  * pinger). A 5-minute interval is more than enough for a 24h timeout
  * default; once per hour would also be acceptable for low-volume
  * tenants.
+ *
+ * The scan spans accounts by design (it runs as the service role); each
+ * timeout is a single gated UPDATE on the run's id.
  */
 export async function GET(request: Request) {
   const expected = process.env.AUTOMATION_CRON_SECRET
@@ -45,67 +49,44 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const admin = supabaseAdmin()
   const now = new Date()
 
   // Pull all currently-active runs along with their parent flow's
   // fallback_policy. Joined in one query — the small set of active
   // runs per tenant keeps this cheap.
-  const { data: runs, error } = await admin
-    .from('flow_runs')
-    .select(
-      'id, flow_id, user_id, contact_id, last_advanced_at, flows ( fallback_policy )',
-    )
-    .eq('status', 'active')
-
-  if (error) {
-    console.error('[flows-cron] active-run scan failed:', error.message)
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  let runs: Awaited<ReturnType<typeof listActiveRunsForSweep>>
+  try {
+    runs = await asService((db) => listActiveRunsForSweep(db))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[flows-cron] active-run scan failed:', message)
+    return NextResponse.json({ error: 'active-run scan failed' }, { status: 500 })
   }
-  if (!runs?.length) return NextResponse.json({ swept: 0 })
-
-  type Row = {
-    id: string
-    flow_id: string
-    user_id: string
-    contact_id: string | null
-    last_advanced_at: string
-    flows: { fallback_policy: unknown } | { fallback_policy: unknown }[] | null
-  }
+  if (!runs.length) return NextResponse.json({ swept: 0 })
 
   let swept = 0
-  for (const r of runs as Row[]) {
-    const flowsField = Array.isArray(r.flows) ? r.flows[0] : r.flows
-    const policy = resolveFallbackPolicy(flowsField?.fallback_policy ?? null)
+  for (const r of runs) {
+    const policy = resolveFallbackPolicy(
+      (r.fallback_policy ?? null) as Parameters<typeof resolveFallbackPolicy>[0],
+    )
     const lastAdvanced = new Date(r.last_advanced_at)
     const ageHours = (now.getTime() - lastAdvanced.getTime()) / (1000 * 60 * 60)
     if (ageHours < policy.on_timeout_hours) continue
 
     // Mark timed_out — guarded by the precondition `status='active'`
     // so concurrent advance from a late inbound doesn't overwrite a
-    // legitimate update.
-    const { data: updated } = await admin
-      .from('flow_runs')
-      .update({
-        status: 'timed_out',
-        ended_at: now.toISOString(),
-        end_reason: 'stale_sweep',
-      })
-      .eq('id', r.id)
-      .eq('status', 'active')
-      .select('id')
-
-    if (Array.isArray(updated) && updated.length > 0) {
-      await admin.from('flow_run_events').insert({
-        flow_run_id: r.id,
-        event_type: 'timeout',
-        payload: {
-          age_hours: Math.round(ageHours * 10) / 10,
-          policy_hours: policy.on_timeout_hours,
-        },
-      })
-      swept += 1
-    }
+    // legitimate update. The `timeout` event lands in the same
+    // transaction.
+    const timedOut = await asService((db) =>
+      timeOutRun(db, r.id, now, {
+        age_hours: Math.round(ageHours * 10) / 10,
+        policy_hours: policy.on_timeout_hours,
+      }),
+    ).catch((err) => {
+      console.error('[flows-cron] timeout failed:', r.id, err)
+      return false
+    })
+    if (timedOut) swept += 1
   }
 
   return NextResponse.json({ swept })

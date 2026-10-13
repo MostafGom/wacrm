@@ -1,7 +1,9 @@
+// GET  /api/automations — the account's automations, newest first (any member).
+// POST /api/automations — create an automation, optionally from a template
+//                         and with its step tree (agent+, like the RLS policy).
+
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { requireRole, toErrorResponse } from '@/lib/auth/account'
-import { supabaseAdmin } from '@/lib/automations/admin-client'
+import { HttpError, requireRole, toErrorResponse } from '@/lib/auth/account'
 import { getTemplate } from '@/lib/automations/templates'
 import { insertSteps, type BuilderStepInput } from '@/lib/automations/steps-tree'
 import {
@@ -9,130 +11,108 @@ import {
   validateTriggerForActivation,
 } from '@/lib/automations/validate'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { readJsonBody } from '@/server/http'
+import { insertAutomation, listAutomations } from '@/server/repos/automations'
 
 const t = getT('Api')
 
 export async function GET() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
-
-  const { data, error } = await supabase
-    .from('automations')
-    .select('*')
-    .order('created_at', { ascending: false })
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ automations: data ?? [] })
-}
-
-export async function POST(request: Request) {
-  // Creating an automation is a write — the RLS automations_insert policy
-  // requires `agent`, but this route inserts via the service-role client
-  // which bypasses RLS, so the role must be enforced here.
   try {
-    await requireRole('agent')
+    const ctx = await requireRole('viewer')
+    const automations = await asUser(ctx.userId, (db) => listAutomations(db, ctx.accountId))
+    return NextResponse.json({ automations })
   } catch (err) {
     return toErrorResponse(err)
   }
+}
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
+export async function POST(request: Request) {
+  try {
+    // Creating an automation is a write — the RLS automations_insert
+    // policy requires `agent`.
+    const ctx = await requireRole('agent')
+    const body = await readJsonBody(request)
 
-  // Resolve the caller's account_id — `automations.account_id` is NOT
-  // NULL post-017, so an INSERT without it trips the not-null constraint
-  // even though the admin client bypasses RLS.
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('account_id')
-    .eq('user_id', user.id)
-    .single()
-  const accountId = profile?.account_id as string | undefined
-  if (!accountId) {
-    return NextResponse.json(
-      { error: t('common.profileNotLinked') },
-      { status: 403 },
-    )
-  }
-
-  const body = await request.json().catch(() => null)
-  if (!body) return NextResponse.json({ error: t('common.invalidJson') }, { status: 400 })
-
-  const { name, description, trigger_type, trigger_config, is_active, steps, template } = body
-
-  let effectiveSteps: BuilderStepInput[] | undefined = steps
-  let effectiveName = name
-  let effectiveDescription = description
-  let effectiveTriggerType = trigger_type
-  let effectiveTriggerConfig = trigger_config
-
-  if (template && (!steps || steps.length === 0)) {
-    const tpl = getTemplate(template)
-    if (tpl) {
-      effectiveName = effectiveName ?? tpl.name
-      effectiveDescription = effectiveDescription ?? tpl.description
-      effectiveTriggerType = effectiveTriggerType ?? tpl.trigger_type
-      effectiveTriggerConfig = effectiveTriggerConfig ?? tpl.trigger_config
-      effectiveSteps = tpl.steps as unknown as BuilderStepInput[]
+    const { name, description, trigger_type, trigger_config, is_active, steps, template } = body as {
+      name?: string
+      description?: string | null
+      trigger_type?: string
+      trigger_config?: Record<string, unknown>
+      is_active?: boolean
+      steps?: BuilderStepInput[]
+      template?: string
     }
-  }
 
-  if (!effectiveName || !effectiveTriggerType) {
-    return NextResponse.json(
-      { error: t('automations.nameTriggerRequired') },
-      { status: 400 },
-    )
-  }
+    let effectiveSteps: BuilderStepInput[] | undefined = steps
+    let effectiveName = name
+    let effectiveDescription = description
+    let effectiveTriggerType = trigger_type
+    let effectiveTriggerConfig = trigger_config
 
-  // Block activation of a clearly broken automation up-front instead of
-  // letting every trigger silently produce a failed log row. Drafts
-  // (is_active=false) are allowed to be incomplete so users can save
-  // progress mid-build.
-  if (is_active) {
-    const issues = [
-      ...validateTriggerForActivation(effectiveTriggerType, effectiveTriggerConfig ?? {}),
-      ...validateStepsForActivation(
-        (effectiveSteps ?? []) as unknown as { step_type: string; step_config: Record<string, unknown> }[],
-      ),
-    ]
-    if (issues.length > 0) {
-      return NextResponse.json(
-        { error: t('automations.invalidActivateConfig'), issues },
-        { status: 400 },
-      )
+    if (template && (!steps || steps.length === 0)) {
+      const tpl = getTemplate(template)
+      if (tpl) {
+        effectiveName = effectiveName ?? tpl.name
+        effectiveDescription = effectiveDescription ?? tpl.description
+        effectiveTriggerType = effectiveTriggerType ?? tpl.trigger_type
+        effectiveTriggerConfig = effectiveTriggerConfig ?? (tpl.trigger_config as Record<string, unknown>)
+        effectiveSteps = tpl.steps as unknown as BuilderStepInput[]
+      }
     }
-  }
 
-  const admin = supabaseAdmin()
-  const { data: automation, error: insertErr } = await admin
-    .from('automations')
-    .insert({
-      user_id: user.id,
-      account_id: accountId,
-      name: effectiveName,
-      description: effectiveDescription ?? null,
-      trigger_type: effectiveTriggerType,
-      trigger_config: effectiveTriggerConfig ?? {},
-      is_active: !!is_active,
+    if (
+      !effectiveName ||
+      !effectiveTriggerType ||
+      typeof effectiveName !== 'string' ||
+      typeof effectiveTriggerType !== 'string'
+    ) {
+      throw new HttpError(400, t('automations.nameTriggerRequired'))
+    }
+    if (effectiveSteps !== undefined && !Array.isArray(effectiveSteps)) {
+      throw new HttpError(400, t('common.invalidRequestBody'))
+    }
+
+    // Block activation of a clearly broken automation up-front instead of
+    // letting every trigger silently produce a failed log row. Drafts
+    // (is_active=false) are allowed to be incomplete so users can save
+    // progress mid-build.
+    if (is_active) {
+      const issues = [
+        ...validateTriggerForActivation(effectiveTriggerType, effectiveTriggerConfig ?? {}),
+        ...validateStepsForActivation(
+          (effectiveSteps ?? []) as unknown as { step_type: string; step_config: Record<string, unknown> }[],
+        ),
+      ]
+      if (issues.length > 0) {
+        return NextResponse.json(
+          { error: t('automations.invalidActivateConfig'), issues },
+          { status: 400 },
+        )
+      }
+    }
+
+    const triggerType = effectiveTriggerType
+    const automationName = effectiveName
+    // The automation and its steps commit together.
+    const automation = await asUser(ctx.userId, async (db) => {
+      const row = await insertAutomation(db, {
+        user_id: ctx.userId,
+        account_id: ctx.accountId,
+        name: automationName,
+        description: effectiveDescription ?? null,
+        trigger_type: triggerType,
+        trigger_config: effectiveTriggerConfig ?? {},
+        is_active: !!is_active,
+      })
+      if (effectiveSteps && effectiveSteps.length > 0) {
+        await insertSteps(db, ctx.accountId, row.id, effectiveSteps)
+      }
+      return row
     })
-    .select()
-    .single()
 
-  if (insertErr || !automation) {
-    return NextResponse.json(
-      { error: insertErr?.message ?? t('common.insertFailed') },
-      { status: 500 },
-    )
+    return NextResponse.json({ automation }, { status: 201 })
+  } catch (err) {
+    return toErrorResponse(err)
   }
-
-  if (effectiveSteps && effectiveSteps.length > 0) {
-    const err = await insertSteps(automation.id, effectiveSteps)
-    if (err) return NextResponse.json({ error: err }, { status: 500 })
-  }
-
-  return NextResponse.json({ automation }, { status: 201 })
 }

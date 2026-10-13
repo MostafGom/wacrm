@@ -1,4 +1,5 @@
-import type { SupabaseClient } from '@/lib/db'
+import { asService } from '@/server/db'
+import { conversationInAccount } from '@/server/repos/engine-data'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
@@ -6,10 +7,9 @@ const t = getT('LibErrors')
 // ------------------------------------------------------------
 // Conversation tenancy guard for the service-role send paths.
 //
-// Both engines persist an outbound message as `messages.insert({
-// conversation_id })` plus a `conversations` preview update, through
-// the service-role client — so RLS does not scope either write, and an
-// INSERT has no `WHERE` clause to hang a tenancy predicate off.
+// Both engines persist an outbound message (a `messages` insert keyed
+// on `conversation_id`) plus a `conversations` preview update as the
+// service role — so RLS does not scope either write.
 //
 // The engines already refuse a contact outside the account. A
 // conversation id was taken on trust, which is what made
@@ -20,6 +20,8 @@ const t = getT('LibErrors')
 //
 // Callers check here before the Meta call rather than after: once Meta
 // has the message it is delivered, and there is nothing left to undo.
+// (The message insert itself is also account-guarded — see
+// recordBotMessage — as a second line of defense.)
 // ------------------------------------------------------------
 
 /**
@@ -31,20 +33,20 @@ const t = getT('LibErrors')
  * whether a given UUID exists.
  */
 export async function assertConversationInAccount(
-  db: SupabaseClient,
   conversationId: string,
   accountId: string,
 ): Promise<void> {
-  const { data, error } = await db
-    .from('conversations')
-    .select('id')
-    .eq('id', conversationId)
-    .eq('account_id', accountId)
-    .maybeSingle()
-  if (error) {
-    throw new Error(t('send.conversationLookupFailed', { message: error.message }))
+  let found: boolean
+  try {
+    found = await asService((db) => conversationInAccount(db, accountId, conversationId))
+  } catch (error) {
+    throw new Error(
+      t('send.conversationLookupFailed', {
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
   }
-  if (!data) {
+  if (!found) {
     throw new Error(t('send.conversationNotFound'))
   }
 }

@@ -1,4 +1,10 @@
-import { supabaseAdmin } from './admin-client'
+import type { Db } from '@/server/db'
+import {
+  deleteAutomationSteps,
+  insertAutomationSteps,
+  listAutomationSteps,
+  type StepRow,
+} from '@/server/repos/automations'
 
 // ------------------------------------------------------------
 // Builder payload → flat rows for automation_steps.
@@ -18,46 +24,46 @@ export interface BuilderStepInput {
   parent_index?: number | null
 }
 
-interface InsertRow {
-  id: string
-  automation_id: string
-  parent_step_id: string | null
-  branch: 'yes' | 'no' | null
-  step_type: string
-  step_config: Record<string, unknown>
-  position: number
-}
-
 const uid = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2) + Date.now().toString(36)
 
+/**
+ * Replace an automation's whole step tree. Run inside one transaction
+ * (the caller's `db`) so a failed insert leaves the old steps intact.
+ */
 export async function replaceSteps(
+  db: Db,
+  accountId: string,
   automationId: string,
   input: BuilderStepInput[],
-): Promise<string | null> {
-  const admin = supabaseAdmin()
-  const { error: delErr } = await admin
-    .from('automation_steps')
-    .delete()
-    .eq('automation_id', automationId)
-  if (delErr) return delErr.message
-  return insertSteps(automationId, input)
+): Promise<void> {
+  await deleteAutomationSteps(db, accountId, automationId)
+  await insertSteps(db, accountId, automationId, input)
 }
 
 export async function insertSteps(
+  db: Db,
+  accountId: string,
   automationId: string,
   input: BuilderStepInput[],
-): Promise<string | null> {
-  if (!input || input.length === 0) return null
+): Promise<void> {
+  const rows = buildStepRows(automationId, input)
+  if (rows.length === 0) return
+  await insertAutomationSteps(db, accountId, rows)
+}
+
+/** Flatten builder input (nested tree, or legacy flat seeds) into rows. Pure. */
+export function buildStepRows(automationId: string, input: BuilderStepInput[]): StepRow[] {
+  if (!input || input.length === 0) return []
 
   const looksFlat = input.some(
     (s) => s.branch !== undefined || s.parent_index !== undefined,
   )
   const tree = looksFlat ? seedsToTree(input) : input
 
-  const rows: InsertRow[] = []
+  const rows: StepRow[] = []
   function walk(
     steps: BuilderStepInput[],
     parentId: string | null,
@@ -81,10 +87,7 @@ export async function insertSteps(
     })
   }
   walk(tree, null, null)
-
-  if (rows.length === 0) return null
-  const { error } = await supabaseAdmin().from('automation_steps').insert(rows)
-  return error?.message ?? null
+  return rows
 }
 
 function seedsToTree(seeds: BuilderStepInput[]): BuilderStepInput[] {
@@ -107,34 +110,28 @@ function seedsToTree(seeds: BuilderStepInput[]): BuilderStepInput[] {
   return roots
 }
 
-/**
- * Load the steps for an automation and rebuild the nested tree shape
- * the builder UI expects. One query, O(n) assembly.
- */
+/** The nested tree shape the builder UI expects. */
 export interface BuilderStepNode extends BuilderStepInput {
   id: string
   branches: { yes: BuilderStepNode[]; no: BuilderStepNode[] }
 }
 
-interface DbStep {
-  id: string
-  parent_step_id: string | null
-  branch: 'yes' | 'no' | null
-  step_type: string
-  step_config: Record<string, unknown>
-  position: number
+/**
+ * Load the steps for an account's automation and rebuild the nested
+ * tree. One query, O(n) assembly.
+ */
+export async function loadStepsTree(
+  db: Db,
+  accountId: string,
+  automationId: string,
+): Promise<BuilderStepNode[]> {
+  return buildStepsTree(await listAutomationSteps(db, accountId, automationId))
 }
 
-export async function loadStepsTree(automationId: string): Promise<BuilderStepNode[]> {
-  const { data, error } = await supabaseAdmin()
-    .from('automation_steps')
-    .select('*')
-    .eq('automation_id', automationId)
-    .order('position', { ascending: true })
-
-  if (error) throw new Error(error.message)
-  const rows = (data ?? []) as DbStep[]
-
+/** Rows (ordered by position) → nested builder tree. Pure. */
+export function buildStepsTree(
+  rows: Pick<StepRow, 'id' | 'parent_step_id' | 'branch' | 'step_type' | 'step_config'>[],
+): BuilderStepNode[] {
   const byId = new Map<string, BuilderStepNode>()
   for (const row of rows) {
     byId.set(row.id, {

@@ -3,83 +3,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // ============================================================
 // Entry-trigger dispatch (issue #490).
 //
-// Drives the real `dispatchInboundToFlows` against a fake Supabase so
-// the assertion is "a run was actually started", not "a helper returned
-// true". The bug was that a button tap never reached the keyword
+// Drives the real `dispatchInboundToFlows` against in-memory repository
+// fakes (./engine-test-fakes) so the assertion is "a run was actually
+// started", not "a helper returned true". The bug was that a button tap never reached the keyword
 // matcher at all, so a helper-level test would have missed it.
 // ============================================================
 
-const h = vi.hoisted(() => ({
-  state: {
-    /** Rows loadActiveRunForContact sees. Empty = no run in progress. */
-    activeRuns: [] as unknown[],
-    flows: [] as unknown[],
-    nodes: [] as unknown[],
-    inserted: [] as { table: string; row: Record<string, unknown> }[],
-    /** Set by the flow_runs INSERT; what its .maybeSingle() returns. */
-    insertedRun: null as Record<string, unknown> | null,
-    rpcCalls: [] as string[],
-  },
-}));
-
-vi.mock("./admin-client", () => {
-  function rows(table: string): unknown[] {
-    if (table === "flow_runs") return h.state.activeRuns;
-    if (table === "flows") return h.state.flows;
-    if (table === "flow_nodes") return h.state.nodes;
-    return [];
-  }
-
-  function builder(table: string) {
-    const b: Record<string, unknown> = {
-      select: () => b,
-      eq: () => b,
-      in: () => b,
-      filter: () => b,
-      order: () => b,
-      limit: () => b,
-      update: () => b,
-      insert: (row: Record<string, unknown>) => {
-        h.state.inserted.push({ table, row });
-        if (table === "flow_runs") {
-          h.state.insertedRun = {
-            id: "run-1",
-            vars: {},
-            reprompt_count: 0,
-            ...row,
-          };
-        }
-        return b;
-      },
-      // Only reached on the INSERT ... SELECT for a new run, and on
-      // loadFlow's flows lookup.
-      maybeSingle: async () => ({
-        data:
-          table === "flow_runs" ? h.state.insertedRun : (rows(table)[0] ?? null),
-        error: null,
-      }),
-      single: async () => ({ data: rows(table)[0] ?? null, error: null }),
-      then: (
-        resolve: (r: {
-          data: unknown[];
-          error: null;
-          count: number;
-        }) => unknown,
-      ) => resolve({ data: rows(table), error: null, count: 0 }),
-    };
-    return b;
-  }
-
-  return {
-    supabaseAdmin: () => ({
-      from: (t: string) => builder(t),
-      rpc: (name: string) => {
-        h.state.rpcCalls.push(name);
-        return Promise.resolve({ error: null });
-      },
-    }),
-  };
-});
+vi.mock("@/server/db", async () => (await import("@/test/auth-mocks")).dbModule());
+vi.mock("@/server/repos/flows", async () => (await import("./engine-test-fakes")).flowFakes.flows);
+vi.mock("@/server/repos/flow-runs", async () => (await import("./engine-test-fakes")).flowFakes.runs);
+vi.mock("@/server/repos/engine-data", async () => (await import("./engine-test-fakes")).flowFakes.data);
 
 const engineSendText = vi.fn(async () => ({ whatsapp_message_id: "wamid.1" }));
 
@@ -97,6 +30,9 @@ vi.mock("./meta-send", () => ({
 
 import { dispatchInboundToFlows, entryTriggerTexts } from "./engine";
 import type { ParsedInbound } from "./types";
+import { flowFakes, resetFlowFakes } from "./engine-test-fakes";
+
+const h = { state: flowFakes.state };
 
 const KEYWORD_FLOW = {
   id: "flow-1",
@@ -151,12 +87,8 @@ function startedRuns() {
 
 beforeEach(() => {
   // No run in progress — the whole point is the entry-trigger path.
-  h.state.activeRuns = [];
-  h.state.flows = [];
+  resetFlowFakes();
   h.state.nodes = NODES;
-  h.state.inserted = [];
-  h.state.insertedRun = null;
-  h.state.rpcCalls = [];
   engineSendText.mockClear();
 });
 
@@ -254,6 +186,19 @@ describe("dispatchInboundToFlows — entry triggers (#490)", () => {
     expect(result.consumed).toBe(true);
     expect(result.flow_run_id).toBe("run-1");
     expect(startedRuns()).toHaveLength(1);
+  });
+
+  it("treats a start that lost the one-active-run race as consumed", async () => {
+    h.state.flows = [KEYWORD_FLOW];
+    // ON CONFLICT DO NOTHING on idx_one_active_run_per_contact: a
+    // concurrent webhook already started this contact's run.
+    h.state.insertedRun = null;
+
+    const result = await dispatch({ kind: "text", text: "order status", meta_message_id: "m1" });
+
+    expect(result).toEqual({ consumed: true, outcome: "duplicate_inbound_ignored" });
+    expect(engineSendText).not.toHaveBeenCalled();
+    expect(h.state.rpcCalls).toEqual([]);
   });
 
   it("leaves a non-matching tap for the automations dispatcher", async () => {
