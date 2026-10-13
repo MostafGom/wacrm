@@ -786,7 +786,6 @@
         "send": "Enviar"
       },
       "toastGiveName": "Dê um nome ao disparo antes de salvar um rascunho.",
-      "toastNotSignedIn": "Você não está conectado.",
       "toastNotLinked": "Seu perfil não está vinculado a uma conta.",
       "toastFailedDraft": "Falha ao salvar o rascunho: {error}",
       "toastDraftSaved": "Rascunho salvo",
@@ -906,15 +905,10 @@
       }
     },
     "sending": {
-      "notSignedIn": "Você não está conectado.",
       "notLinkedToAccount": "Seu perfil não está vinculado a uma conta.",
-      "lookupCsvContactsFailed": "Falha ao consultar os contatos do CSV: {error}",
-      "createCsvContactsFailed": "Falha ao criar os contatos do CSV: {error}",
       "noContactsForAudience": "Nenhum contato encontrado para este público.",
       "createBroadcastFailed": "Falha ao criar o disparo: {error}",
       "unknownErrorLower": "erro desconhecido",
-      "insertRecipientBatchFailed": "Falha ao inserir o lote de destinatários {batch}: {error}",
-      "fetchRecipientsFailed": "Falha ao buscar os destinatários do disparo",
       "apiRequestFailed": "Falha na requisição à API de disparo",
       "noPhoneOnContact": "O contato não tem número de telefone",
       "unknownError": "Erro desconhecido"

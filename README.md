@@ -206,11 +206,11 @@ Key pages:
 
 ```
 browser ──► Next.js (Node runtime)
-             ├─ /api/db           data API: query AST → SQL, runs as the user
+             ├─ route handlers    requireRole → repositories (Kysely) as the user
              ├─ /api/auth/*       sessions (HttpOnly cookie), scrypt passwords
              ├─ /api/storage/*    uploads → local disk or S3; public media route
              ├─ /api/realtime     Server-Sent Events  ◄── LISTEN wacrm_realtime
-             └─ route handlers / webhook / engines (service role)
+             └─ webhook / engines / crons / public API (service role)
                       │
                       ▼
              PostgreSQL 17 + pgvector
@@ -226,10 +226,12 @@ browser ──► Next.js (Node runtime)
   user can see. `db/migrations/000_supabase_compat.sql` recreates the
   roles, `auth` / `storage` schemas and defaults those migrations
   expected.
-- **Query layer.** `src/lib/db` implements the subset of the
-  supabase-js query API the app uses (embeds, `!inner`, `or()`, counts,
-  upserts, RPC) by compiling to parameterised SQL validated against the
-  live catalog. Browser components send the same AST to `/api/db`.
+- **Data layer.** Typed Kysely repositories (`src/server/repos/`, types
+  generated from the live schema with `npm run db:types`). Each one
+  runs inside `asUser(userId, …)` or `asService(…)` and scopes by
+  account explicitly; RLS is the second line of defence. Client
+  components never touch the database: they call route handlers.
+  Conventions: [docs/architecture/data-layer.md](./docs/architecture/data-layer.md).
 - **Auth.** scrypt hashes (imported Supabase bcrypt hashes still work
   and are upgraded on login), database-backed sessions, single-use
   email / reset links, optional SMTP, owner- or CLI-generated reset links.

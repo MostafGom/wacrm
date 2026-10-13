@@ -5,15 +5,11 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { inject } from "vitest";
 
-import { refreshCatalog } from "@/lib/db/catalog";
 import { closePool } from "@/server/db/pool";
-import { createServerDb } from "@/lib/db/server-client";
-import type { DbClient } from "@/lib/db/types";
 
 /** Point the app pool at the integration database (call in beforeAll). */
 export function useIntegrationDb(): void {
   process.env.DATABASE_URL = inject("appDatabaseUrl");
-  refreshCatalog();
 }
 
 export async function teardownIntegrationDb(): Promise<void> {
@@ -63,10 +59,4 @@ export async function joinAccount(userId: string, accountId: string, role: strin
   });
 }
 
-export function userDb(userId: string): DbClient {
-  return createServerDb({ role: "authenticated", userId });
-}
 
-export function serviceDb(): DbClient {
-  return createServerDb({ role: "service_role", userId: null });
-}

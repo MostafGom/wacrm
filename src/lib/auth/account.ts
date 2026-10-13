@@ -23,9 +23,7 @@
 // ============================================================
 
 import { NextResponse } from "next/server";
-import type { SupabaseClient } from "@/lib/db";
 
-import { createClient } from "@/lib/supabase/server";
 import { asUser } from "@/server/db";
 import { getAccountSummary, getProfileByUserId } from "@/server/repos/profiles";
 import { getServerSession } from "./server-session";
@@ -108,11 +106,6 @@ export function toErrorResponse(err: unknown): NextResponse {
 // ------------------------------------------------------------
 
 export interface AccountContext {
-  /**
-   * @deprecated Transitional supabase-js-shaped client (RLS scoped to
-   * the caller). Use `asUser(ctx.userId, db => ...)` with a repository.
-   */
-  supabase: SupabaseClient;
   /** `auth.uid()` for the caller. Always defined when this resolves. */
   userId: string;
   /** Caller's account_id from their profile row. */
@@ -126,7 +119,7 @@ export interface AccountContext {
 /**
  * Resolve the caller's user + account + role in one round trip.
  *
- * Throws `UnauthorizedError` if there's no Supabase session.
+ * Throws `UnauthorizedError` if there's no session.
  * Throws `ForbiddenError` if the profile is missing account
  * fields (shouldn't happen post-017 migration; defensive guard
  * against profile rows that pre-date the backfill or were
@@ -174,7 +167,6 @@ export async function getCurrentAccount(): Promise<AccountContext> {
   }
 
   return {
-    supabase: await createClient(),
     userId,
     accountId: profile.account_id,
     role: profile.account_role,

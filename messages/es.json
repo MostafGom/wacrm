@@ -786,7 +786,6 @@
         "send": "Enviar"
       },
       "toastGiveName": "Ponle un nombre a la difusión antes de guardar un borrador.",
-      "toastNotSignedIn": "No has iniciado sesión.",
       "toastNotLinked": "Tu perfil no está vinculado a una cuenta.",
       "toastFailedDraft": "Error al guardar el borrador: {error}",
       "toastDraftSaved": "Borrador guardado",
@@ -906,15 +905,10 @@
       }
     },
     "sending": {
-      "notSignedIn": "No has iniciado sesión.",
       "notLinkedToAccount": "Tu perfil no está vinculado a una cuenta.",
-      "lookupCsvContactsFailed": "No se pudieron buscar los contactos del CSV: {error}",
-      "createCsvContactsFailed": "No se pudieron crear los contactos del CSV: {error}",
       "noContactsForAudience": "No se encontraron contactos para esta audiencia.",
       "createBroadcastFailed": "No se pudo crear la difusión: {error}",
       "unknownErrorLower": "error desconocido",
-      "insertRecipientBatchFailed": "No se pudo insertar el lote de destinatarios {batch}: {error}",
-      "fetchRecipientsFailed": "No se pudieron obtener los destinatarios de la difusión",
       "apiRequestFailed": "Falló la solicitud a la API de difusión",
       "noPhoneOnContact": "El contacto no tiene número de teléfono",
       "unknownError": "Error desconocido"

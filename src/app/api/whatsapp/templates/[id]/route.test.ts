@@ -72,9 +72,6 @@ vi.mock('@/server/repos/profiles', async () =>
   }),
 )
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-// No request scope in a unit test: the transitional request-scoped client
-// that getCurrentAccount still builds reads cookies — hand it none.
-vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }))
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: vi.fn(() => 'plaintext-token'),

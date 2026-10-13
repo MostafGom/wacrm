@@ -1,5 +1,5 @@
 // ============================================================
-// API key generation + hashing — pure, server-side, no Supabase.
+// API key generation + hashing — pure, server-side, no database.
 //
 // Mirrors the invite-token utilities in `src/lib/auth/invitations.ts`:
 // the DB stores only the SHA-256 hash, the plaintext is shown to the

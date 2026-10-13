@@ -19,16 +19,14 @@
 //   }
 //
 // Data access runs under `asService` (src/server/db): an API caller
-// has no session, so there's no `auth.uid()` for RLS to match. The key lookup itself
+// has no session, so there's no `auth.uid()` for RLS to match. The key
+// lookup itself
 // establishes the account; from there every downstream query MUST be
 // explicitly filtered by `ctx.accountId` (the same discipline the
 // dashboard's send route already follows). The key never escalates
 // past its own account because the account is fixed at lookup time.
 // ============================================================
 
-import type { SupabaseClient } from '@/lib/db';
-
-import { supabaseAdmin } from '@/lib/db/admin';
 import { findActiveKeyByHash, touchLastUsed } from '@/lib/api-keys/store';
 import { hashApiKey, looksLikeApiKey } from '@/lib/api-keys/keys';
 import { hasScope, type ApiScope } from '@/lib/api-keys/scopes';
@@ -38,12 +36,6 @@ import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 export interface ApiKeyContext {
   /** Discriminant — lets shared logic tell key auth from cookie auth. */
   authType: 'api_key';
-  /**
-   * @deprecated Transitional service-role client (RLS-bypassing), kept
-   * only until every /api/v1 route reads through repositories under
-   * `asService`. Scope by accountId.
-   */
-  supabase: SupabaseClient;
   /** The account this key belongs to. */
   accountId: string;
   /** The key row id — for audit logging and the rate-limit bucket. */
@@ -112,7 +104,6 @@ export async function requireApiKey(
 
   return {
     authType: 'api_key',
-    supabase: supabaseAdmin(),
     accountId: row.account_id,
     keyId: row.id,
     scopes: row.scopes,

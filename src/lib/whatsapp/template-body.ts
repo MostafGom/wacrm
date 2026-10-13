@@ -14,7 +14,6 @@
 // sends landed in the Inbox as empty bubbles.
 // ============================================================
 
-import type { SupabaseClient } from '@/lib/db';
 
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
 import type { MessageTemplate } from '@/types';
@@ -140,24 +139,6 @@ export function pickTemplateRow(
     malformed: false,
     language: requestedLanguage || chosen.language || 'en_US',
   };
-}
-
-/**
- * @deprecated Transitional: loads candidates through the supabase-shaped
- * client. Use `listTemplatesByName` + `pickTemplateRow`.
- */
-export async function resolveTemplateRow(
-  db: SupabaseClient,
-  accountId: string,
-  templateName: string,
-  requestedLanguage?: string | null
-): Promise<ResolvedTemplate> {
-  const { data } = await db
-    .from('message_templates')
-    .select('*')
-    .eq('account_id', accountId)
-    .eq('name', templateName);
-  return pickTemplateRow(Array.isArray(data) ? data : [], requestedLanguage);
 }
 
 /**

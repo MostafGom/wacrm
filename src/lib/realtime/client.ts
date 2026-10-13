@@ -1,16 +1,16 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- results are untyped `any`, exactly like an untyped supabase-js client; callers cast to their own types. */
+/* eslint-disable @typescript-eslint/no-explicit-any -- row payloads are untyped; subscribers cast to their row type. */
 // ============================================================
-// Browser realtime facade — `supabase.channel(...)
+// Browser realtime client — `createChannel(name)
 //   .on('postgres_changes', { event, table, filter }, cb)
 //   .subscribe(statusCb)` over ONE shared Server-Sent Events stream
-// (/api/realtime) per tab.
+// (/api/realtime) per tab. Clean up with `channel.unsubscribe()`.
 //
 // The server already filters events to the caller's account (and to
 // the recipient for notifications); here we only route by table /
 // event type / the optional `col=eq.value` filter.
 //
-// Status semantics match supabase-js closely enough for the hooks:
-// SUBSCRIBED on (re)connect, CHANNEL_ERROR on a drop. The inbox uses
+// Status semantics (kept from the Supabase Realtime API the hooks were
+// written against): SUBSCRIBED on (re)connect, CHANNEL_ERROR on a drop. The inbox uses
 // the CHANNEL_ERROR → SUBSCRIBED edge to resync what it missed.
 // ============================================================
 
@@ -199,6 +199,3 @@ export function createChannel(name: string): RealtimeChannel {
   return new Channel(name);
 }
 
-export async function removeChannel(ch: RealtimeChannel): Promise<"ok"> {
-  return ch.unsubscribe();
-}

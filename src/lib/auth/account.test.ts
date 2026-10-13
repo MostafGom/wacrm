@@ -37,8 +37,6 @@ vi.mock("@/server/repos/profiles", () => ({
   }),
 }));
 
-// The transitional supabase-shaped client is constructed but unused here.
-vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({}) }));
 
 const { getCurrentAccount, requireRole, ForbiddenError, UnauthorizedError } = await import("./account");
 const profilesRepo = await import("@/server/repos/profiles");

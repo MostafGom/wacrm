@@ -9,8 +9,6 @@ const caller = vi.hoisted(() => ({ userId: 'user-1' as string | null, accountId:
 vi.mock('@/lib/auth/server-session', async () => (await import('@/test/auth-mocks')).sessionModule(caller))
 vi.mock('@/server/repos/profiles', async () => (await import('@/test/auth-mocks')).profilesModule(caller))
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-// requireRole still builds the transitional request-scoped client, which reads cookies.
-vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined, getAll: () => [] }), headers: async () => new Headers() }))
 
 const repo = vi.hoisted(() => ({
   listPipelines: vi.fn(),

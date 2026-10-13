@@ -166,6 +166,8 @@ describe("engine-data conversations + messages", () => {
         .selectFrom("messages")
         .selectAll()
         .where("message_id", "=", "wamid.1")
+        // Other suites share this database and reuse wamids.
+        .where("conversation_id", "=", ids.conversation)
         .executeTakeFirstOrThrow();
       expect(msg).toMatchObject({
         sender_type: "bot",

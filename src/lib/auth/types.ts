@@ -44,7 +44,13 @@ export interface AuthApi {
     options?: { data?: Record<string, unknown>; emailRedirectTo?: string };
   }): Promise<{ data: { user: User | null; session: Session | null }; error: AuthError | null }>;
   signOut(opts?: { scope?: "global" | "local" | "others" }): Promise<{ error: AuthError | null }>;
-  updateUser(attrs: { email?: string; password?: string; data?: Record<string, unknown> }): Promise<{
+  updateUser(attrs: {
+    email?: string;
+    password?: string;
+    /** Verified server-side when present. */
+    current_password?: string;
+    data?: Record<string, unknown>;
+  }): Promise<{
     data: { user: User | null };
     error: AuthError | null;
   }>;

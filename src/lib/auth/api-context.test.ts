@@ -5,13 +5,6 @@ import type { ApiKeyRow } from "@/lib/api-keys/store";
 import { ApiError } from "@/lib/api/v1/respond";
 import { __resetRateLimitForTests, RATE_LIMITS } from "@/lib/rate-limit";
 
-// Transitional: requireApiKey still stashes a service-role client in
-// the context for not-yet-converted /api/v1 routes; tests never call
-// through it.
-vi.mock("@/lib/db/admin", () => ({
-  supabaseAdmin: () => ({ __isMockAdminClient: true }),
-}));
-
 // Mock the store so we control which row a hash resolves to.
 const findActiveKeyByHash = vi.fn<(hash: string) => Promise<ApiKeyRow | null>>();
 const touchLastUsed = vi.fn();

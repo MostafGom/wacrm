@@ -49,22 +49,16 @@ export function PasswordForm() {
     setSaving(true);
 
     try {
-      // Supabase doesn't expose a "verify password without issuing a
-      // session" API, so we re-authenticate with the provided current
-      // password. If it matches, the session refreshes silently; if it
-      // doesn't, we abort before calling updateUser.
-      const { error: signInError } = await auth.signInWithPassword({
-        email: profile.email,
-        password: current,
+      // The server verifies the current password and swaps the hash in
+      // one call; other devices are signed out on success.
+      const { error: updateError } = await auth.updateUser({
+        password: next,
+        current_password: current,
       });
-      if (signInError) {
+      if (updateError?.code === 'invalid_credentials') {
         toast.error(t('currentPasswordIncorrect'));
         return;
       }
-
-      const { error: updateError } = await auth.updateUser({
-        password: next,
-      });
       if (updateError) {
         toast.error(t('passwordUpdateFailed', { message: updateError.message }));
         return;

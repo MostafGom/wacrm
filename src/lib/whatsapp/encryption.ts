@@ -21,9 +21,9 @@ import crypto from 'crypto'
  * Backward compatibility:
  *   `decrypt()` auto-detects the format by counting parts, so legacy
  *   rows keep working. New `encrypt()` output is always GCM.
- *   Existing rows can be upgraded in place by call sites that hold a
- *   Supabase client — see the `isLegacyFormat` / `encrypt` pattern in
- *   `src/app/api/whatsapp/send/route.ts`.
+ *   Existing rows can be upgraded in place by call sites that can write
+ *   whatsapp_config — see the `isLegacyFormat` / `encrypt` pattern in
+ *   the send path (src/lib/whatsapp/send-message.ts).
  */
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY!

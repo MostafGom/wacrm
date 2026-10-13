@@ -11,13 +11,6 @@ import { randomBytes } from 'node:crypto';
 /** Secret prefix — self-identifying, like `wacrm_live_` for keys. */
 export const WEBHOOK_SECRET_PREFIX = 'whsec_';
 
-/**
- * Columns safe to return over the API — everything except the
- * (encrypted) `secret`, which is only ever surfaced once at creation.
- */
-export const WEBHOOK_PUBLIC_COLUMNS =
-  'id, url, events, is_active, last_delivery_at, failure_count, created_at';
-
 export interface ApiWebhookEndpoint {
   id: string;
   url: string;
@@ -33,7 +26,10 @@ export function generateWebhookSecret(): string {
   return `${WEBHOOK_SECRET_PREFIX}${randomBytes(32).toString('base64url')}`;
 }
 
-/** Project a `WEBHOOK_PUBLIC_COLUMNS` row into the API shape. */
+/**
+ * Project an endpoint row into the API shape — everything except the
+ * (encrypted) `secret`, which is only ever surfaced once at creation.
+ */
 export function serializeWebhookEndpoint(
   row: Record<string, unknown>
 ): ApiWebhookEndpoint {

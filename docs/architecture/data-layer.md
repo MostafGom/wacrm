@@ -84,10 +84,10 @@ Generated types use the same shapes the UI has always received:
      viewer reads, agent writes operational data, admin writes settings.
    - Mutations validate their body by hand. `zod` is not a dependency.
 
-8. **Client components** replace `supabase.from(...)` with
-   `apiRequest` calls to a route handler. Keep the UI behavior,
-   optimistic updates and toasts as they were. Realtime subscriptions
-   use `createChannel`.
+8. **Client components** never query the database. They call route
+   handlers through a per-area client module (`src/lib/<area>/<area>-api.ts`,
+   built on `apiRequest`), and subscribe to live changes with
+   `createChannel`.
 
 9. **Tests:**
    - **Unit tests** mock the repository modules (`vi.mock('@/server/repos/x')`)

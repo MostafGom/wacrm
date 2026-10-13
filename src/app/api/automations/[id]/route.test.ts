@@ -45,10 +45,6 @@ const h = vi.hoisted(() => ({
 vi.mock('@/lib/auth/server-session', async () => (await import('@/test/auth-mocks')).sessionModule(caller))
 vi.mock('@/server/repos/profiles', async () => (await import('@/test/auth-mocks')).profilesModule(caller))
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-// getCurrentAccount still builds the transitional session-scoped client
-// on its context, which reads the request cookies; there is no request
-// scope here.
-vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }))
 
 vi.mock('@/server/repos/automations', () => {
   const { state } = h

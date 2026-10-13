@@ -16,11 +16,11 @@ process**.
 | Supabase feature | Replacement in this repo |
 |---|---|
 | Postgres + `auth.uid()` RLS | Same migrations, plus `db/migrations/000_supabase_compat.sql` (roles, `auth`/`storage` schemas, default privileges) |
-| PostgREST + supabase-js | `src/lib/db/`: supabase-js-compatible query builder → parameterised SQL. Server code runs it in-process; browser code goes through `POST /api/db` |
+| PostgREST + supabase-js | Typed Kysely repositories in `src/server/repos/` (types generated from the schema, `npm run db:types`). Client components call route handlers; see [architecture/data-layer.md](./architecture/data-layer.md) |
 | Supabase Auth (GoTrue) | `src/lib/auth/`: scrypt passwords, sessions table + HttpOnly cookie, single-use links, optional SMTP. Routes: `/api/auth/*` |
 | Storage buckets | `src/lib/storage/`: local disk or S3 driver. Metadata stays in `storage.objects`. Routes: `/api/storage/*` |
 | Realtime `postgres_changes` | `db/migrations/048`: NOTIFY triggers. `src/lib/realtime/` serves them over SSE at `/api/realtime` |
-| Service-role key | Postgres role `service_role` (BYPASSRLS), used by `supabaseAdmin()` |
+| Service-role key | Postgres role `service_role` (BYPASSRLS), used through `asService()` |
 | Supabase CLI migrations | `scripts/migrate.mjs` (`npm run db:migrate`) |
 
 ## Security model
@@ -36,15 +36,10 @@ process**.
 3. **RLS unchanged.** `auth.uid()` reads that setting, so the RLS
    policies from the original migrations apply unchanged. There are 158
    of them: account membership, role ranks, storage folders.
-4. **`/api/db` (browser data access) restrictions:**
-   - It requires a session; there is no anonymous access.
-   - It checks the same origin.
-   - It is rate limited, and the body and statement time are capped.
-   - It only reaches `public` tables. Every identifier is validated
-     against the live catalog, and every value is a bind parameter.
-   - Only two RPCs are callable from the browser: `touch_presence` and
-     `filter_contacts_by_tags`.
-   - `DB_HTTP_DENY_TABLES=a,b` hides tables from the browser entirely.
+4. **No browser database access.** Client components only call route
+   handlers. Each handler checks the session and role (`requireRole`)
+   and runs repository queries under `asUser`. Those queries filter by
+   account explicitly, and RLS enforces the same rules underneath.
 5. **Service role.** Webhooks, engines, crons and the public API run as
    `service_role` and scope every query by `account_id`, as before.
 
@@ -131,16 +126,8 @@ project into the new database.
 ```bash
 npm test                     # unit tests (no database)
 TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
-  npm run test:integration   # real Postgres: adapter, RLS, auth, storage, realtime
+  npm run test:integration   # real Postgres: repositories, RLS, auth, storage, realtime
 ```
 
 `TEST_DATABASE_URL` must be a superuser connection. The tests create and
 use a separate `wacrm_it` database.
-
-## Roadmap (Phase B)
-
-`/api/db` and the supabase-js-shaped builder exist so that the whole
-app could move off Supabase in one step. The plan is to move feature by
-feature to typed queries (Kysely, with types generated from the schema)
-behind server routes, shrinking what `/api/db` exposes until it can be
-removed.

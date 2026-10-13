@@ -1,6 +1,7 @@
-// Browser `supabase.storage` facade over /api/storage/*.
+// Browser storage client over /api/storage/*:
+//   getBrowserStorage().from('chat-media').upload(path, file, opts)
 //
-// `getPublicUrl` is synchronous in supabase-js. The server is the source
+// `getPublicUrl` is synchronous (a URL helper). The server is the source
 // of truth for the public base URL (PUBLIC_URL), so the URL returned by
 // an upload is remembered and handed back by getPublicUrl; for paths
 // this tab didn't upload it falls back to the current origin.

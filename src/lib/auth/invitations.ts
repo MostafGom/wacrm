@@ -1,5 +1,5 @@
 // ============================================================
-// Invitation token utilities — pure, server-side, no Supabase.
+// Invitation token utilities — pure, server-side, no database.
 //
 // Why we hash tokens at rest
 // --------------------------

@@ -786,7 +786,6 @@
         "send": "Send"
       },
       "toastGiveName": "Give the broadcast a name before saving a draft.",
-      "toastNotSignedIn": "Not signed in.",
       "toastNotLinked": "Your profile is not linked to an account.",
       "toastFailedDraft": "Failed to save draft: {error}",
       "toastDraftSaved": "Draft saved",
@@ -906,15 +905,10 @@
       }
     },
     "sending": {
-      "notSignedIn": "You are not signed in.",
       "notLinkedToAccount": "Your profile is not linked to an account.",
-      "lookupCsvContactsFailed": "Failed to look up CSV contacts: {error}",
-      "createCsvContactsFailed": "Failed to create CSV contacts: {error}",
       "noContactsForAudience": "No contacts found for this audience.",
       "createBroadcastFailed": "Failed to create broadcast: {error}",
       "unknownErrorLower": "unknown error",
-      "insertRecipientBatchFailed": "Failed to insert recipient batch {batch}: {error}",
-      "fetchRecipientsFailed": "Failed to fetch broadcast recipients",
       "apiRequestFailed": "Broadcast API request failed",
       "noPhoneOnContact": "No phone number on contact",
       "unknownError": "Unknown error"

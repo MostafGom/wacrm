@@ -8,12 +8,6 @@ const caller = vi.hoisted(() => ({
 vi.mock('@/lib/auth/server-session', async () => (await import('@/test/auth-mocks')).sessionModule(caller))
 vi.mock('@/server/repos/profiles', async () => (await import('@/test/auth-mocks')).profilesModule(caller))
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-// The account context still builds the transitional request-scoped
-// client from cookies; give it an empty cookie jar outside a request.
-vi.mock('next/headers', () => ({
-  cookies: async () => ({ getAll: () => [], get: () => undefined, set: () => {} }),
-  headers: async () => new Headers(),
-}))
 
 const repo = vi.hoisted(() => ({
   getAiConfigSummary: vi.fn(),

@@ -264,6 +264,11 @@ export async function consumeLink(
 export interface UpdateUserInput {
   email?: unknown;
   password?: unknown;
+  /**
+   * When present, must match the current password (Settings → Security).
+   * The reset-password flow omits it: the recovery link proved control.
+   */
+  currentPassword?: unknown;
   data?: unknown;
 }
 
@@ -278,6 +283,12 @@ export async function updateUser(
     const weak = validatePasswordStrength(input.password);
     if (weak) throw new AuthFailure("weak_password", 422, t("weakPassword"));
     const current = await findUserById(userId);
+    if (input.currentPassword !== undefined) {
+      const ok =
+        typeof input.currentPassword === "string" &&
+        (await verifyPassword(input.currentPassword, current?.encrypted_password)).ok;
+      if (!ok) throw new AuthFailure("invalid_credentials", 400, t("invalidCredentials"));
+    }
     if (current?.encrypted_password && (await verifyPassword(input.password as string, current.encrypted_password)).ok) {
       throw new AuthFailure("same_password", 422, t("samePassword"));
     }

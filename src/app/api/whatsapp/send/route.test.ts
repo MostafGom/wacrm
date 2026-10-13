@@ -44,9 +44,6 @@ vi.mock('@/server/repos/profiles', async () =>
   }),
 )
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-// requireRole still builds the transitional per-request client from the
-// session cookie; there is no request scope in a unit test.
-vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }))
 
 vi.mock('@/server/repos/contacts', () => ({
   getContact: vi.fn(async () => h.contactRow ?? undefined),
