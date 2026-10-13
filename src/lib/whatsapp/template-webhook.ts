@@ -21,7 +21,8 @@
  *
  * ─── Multi-tenant note ────────────────────────────────────────────
  * `meta_template_id` is globally unique per WABA — the lookup doesn't
- * filter by user_id. If two wacrm tenants somehow ended up with the
+ * filter by account (the event carries none; Meta's id already names
+ * one tenant's template). If two wacrm tenants somehow ended up with the
  * same id (impossible in practice, but a theoretical race during
  * cross-tenant moves), the handler updates both rows and logs a
  * warning so operators can investigate.
@@ -40,7 +41,13 @@
  * the stub on (account_id, name, language).
  */
 
-import type { SupabaseClient } from '@/lib/db'
+import { asService } from '@/server/db'
+import {
+  insertTemplateStub,
+  listConfigOwnersByWabaId,
+  updateTemplatesByMetaId,
+  type TemplateEventPatch,
+} from '@/server/repos/inbound-templates'
 import { normalizeStatus } from './template-status-normalize'
 
 const TEMPLATE_WEBHOOK_FIELDS = new Set([
@@ -89,34 +96,57 @@ export interface TemplateWebhookChange {
 /** `body_text` is NOT NULL; the sync route uses '' for a body-less template too. */
 const STUB_BODY_TEXT = ''
 const DEFAULT_TEMPLATE_LANGUAGE = 'en_US'
-/** Postgres unique_violation — the row appeared between our UPDATE and INSERT. */
-const PG_UNIQUE_VIOLATION = '23505'
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Run the event's UPDATE (keyed on meta_template_id) in its own short
+ * service-role transaction. Returns the touched ids, or null after
+ * logging when the statement failed.
+ */
+async function applyUpdate(
+  kind: string,
+  metaTemplateId: string,
+  update: TemplateEventPatch,
+): Promise<string[] | null> {
+  try {
+    return await asService((db) =>
+      updateTemplatesByMetaId(db, metaTemplateId, update),
+    )
+  } catch (err) {
+    console.error(
+      `[template-webhook] ${kind} failed for meta_template_id`,
+      metaTemplateId,
+      errorMessage(err),
+    )
+    return null
+  }
+}
 
 /**
  * Dispatch a single change record to the matching handler. Returns
  * silently on unrecognised fields — the caller already pre-filtered
  * via isTemplateWebhookField, but treat unknown values as no-ops
  * defensively in case Meta adds new template fields later.
+ *
+ * Every database step runs in its own short service-role transaction;
+ * failures are logged, never thrown.
  */
 export async function handleTemplateWebhookChange(
   change: TemplateWebhookChange,
-  // SupabaseClient typed loosely — the webhook route lazy-initialises
-  // the admin client and exposes it as `any`. Type as the generic
-  // SupabaseClient here so this module is testable in isolation.
-  supabase: SupabaseClient,
 ): Promise<void> {
   switch (change.field) {
     case 'message_template_status_update':
       await handleStatusUpdate(
         change.value as TemplateStatusUpdateValue,
-        supabase,
         change.wabaId,
       )
       return
     case 'message_template_quality_update':
       await handleQualityUpdate(
         change.value as TemplateQualityUpdateValue,
-        supabase,
         change.wabaId,
       )
       return
@@ -130,7 +160,6 @@ export async function handleTemplateWebhookChange(
 
 async function handleStatusUpdate(
   value: TemplateStatusUpdateValue,
-  supabase: SupabaseClient,
   wabaId: string | undefined,
 ): Promise<void> {
   const metaTemplateId =
@@ -151,28 +180,16 @@ async function handleStatusUpdate(
   // where Meta sends a human-readable explanation. Clear it on any
   // other status flip so the UI doesn't show a stale REJECTED banner
   // after Meta re-approves a resubmitted template.
-  const update: Record<string, unknown> = {
+  const update: TemplateEventPatch = {
     status,
     rejection_reason:
       status === 'REJECTED' ? value.reason ?? 'Rejected by Meta' : null,
     submission_error: null,
   }
 
-  const { data, error } = await supabase
-    .from('message_templates')
-    .update(update)
-    .eq('meta_template_id', metaTemplateId)
-    .select('id')
-
-  if (error) {
-    console.error(
-      '[template-webhook] status update failed for meta_template_id',
-      metaTemplateId,
-      error.message,
-    )
-    return
-  }
-  if (!data || data.length === 0) {
+  const ids = await applyUpdate('status update', metaTemplateId, update)
+  if (!ids) return
+  if (ids.length === 0) {
     await createStubForUnknownTemplate({
       kind: 'status update',
       metaTemplateId,
@@ -180,26 +197,18 @@ async function handleStatusUpdate(
       language: value.message_template_language,
       wabaId,
       fields: update,
-      retryUpdate: () =>
-        supabase
-          .from('message_templates')
-          .update(update)
-          .eq('meta_template_id', metaTemplateId)
-          .select('id'),
-      supabase,
     })
     return
   }
-  if (data.length > 1) {
+  if (ids.length > 1) {
     console.warn(
-      `[template-webhook] status update matched ${data.length} rows for meta_template_id ${metaTemplateId} — investigate.`,
+      `[template-webhook] status update matched ${ids.length} rows for meta_template_id ${metaTemplateId} — investigate.`,
     )
   }
 }
 
 async function handleQualityUpdate(
   value: TemplateQualityUpdateValue,
-  supabase: SupabaseClient,
   wabaId: string | undefined,
 ): Promise<void> {
   const metaTemplateId =
@@ -220,25 +229,10 @@ async function handleQualityUpdate(
       ? (raw.toUpperCase() as 'GREEN' | 'YELLOW' | 'RED')
       : null
 
-  const update = { quality_score: score }
-  const runUpdate = () =>
-    supabase
-      .from('message_templates')
-      .update(update)
-      .eq('meta_template_id', metaTemplateId)
-      .select('id')
-
-  const { data, error } = await runUpdate()
-
-  if (error) {
-    console.error(
-      '[template-webhook] quality update failed for meta_template_id',
-      metaTemplateId,
-      error.message,
-    )
-    return
-  }
-  if (!data || data.length === 0) {
+  const update: TemplateEventPatch = { quality_score: score }
+  const ids = await applyUpdate('quality update', metaTemplateId, update)
+  if (!ids) return
+  if (ids.length === 0) {
     // A quality event carries no status. Leave `status` to the column
     // default (DRAFT) rather than guessing APPROVED — Meta does score
     // PAUSED templates too. "Sync from Meta" fixes it up.
@@ -249,8 +243,6 @@ async function handleQualityUpdate(
       language: value.message_template_language,
       wabaId,
       fields: update,
-      retryUpdate: runUpdate,
-      supabase,
     })
   }
 }
@@ -263,13 +255,7 @@ interface StubParams {
   language: string | undefined
   wabaId: string | undefined
   /** Event-derived columns (status / rejection_reason / quality_score). */
-  fields: Record<string, unknown>
-  /** Re-runs the original UPDATE if the INSERT loses a race. */
-  retryUpdate: () => PromiseLike<{
-    data: { id: string }[] | null
-    error: { message: string } | null
-  }>
-  supabase: SupabaseClient
+  fields: TemplateEventPatch
 }
 
 /**
@@ -286,7 +272,7 @@ interface StubParams {
  * components arrive on the next manual sync.
  */
 async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
-  const { kind, metaTemplateId, name, wabaId, supabase } = p
+  const { kind, metaTemplateId, name, wabaId } = p
   const where = `meta_template_id ${metaTemplateId} (${name ?? 'unnamed'}), WABA ${wabaId ?? 'unknown'}`
 
   if (!wabaId) {
@@ -302,19 +288,16 @@ async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
     return
   }
 
-  const { data: configs, error: configError } = await supabase
-    .from('whatsapp_config')
-    .select('account_id, user_id')
-    .eq('waba_id', wabaId)
-
-  if (configError) {
+  let rows: { account_id: string; user_id: string }[]
+  try {
+    rows = await asService((db) => listConfigOwnersByWabaId(db, wabaId))
+  } catch (err) {
     console.error(
       `[template-webhook] ${kind} for unknown template ${where} — whatsapp_config lookup failed:`,
-      configError.message,
+      errorMessage(err),
     )
     return
   }
-  const rows = (configs ?? []) as { account_id: string; user_id: string }[]
   if (rows.length !== 1) {
     console.warn(
       `[template-webhook] ${kind} for unknown template ${where} — ${rows.length === 0 ? 'no' : rows.length} whatsapp_config rows match that WABA id; not creating a stub. Run "Sync from Meta" for the owning account.`,
@@ -337,39 +320,44 @@ async function createStubForUnknownTemplate(p: StubParams): Promise<void> {
     ...p.fields,
   }
 
-  const { error: insertError } = await supabase
-    .from('message_templates')
-    .insert(stub)
+  let inserted: boolean
+  try {
+    // ON CONFLICT DO NOTHING: a unique-index conflict comes back as
+    // `false` instead of an aborted statement.
+    inserted = await asService((db) => insertTemplateStub(db, stub))
+  } catch (err) {
+    console.error(
+      `[template-webhook] ${kind} for unknown template ${where} — stub insert failed:`,
+      errorMessage(err),
+    )
+    return
+  }
 
-  if (!insertError) {
+  if (inserted) {
     console.info(
       `[template-webhook] ${kind} for unknown template ${where} — created stub row for account ${config.account_id}; run "Sync from Meta" to backfill components.`,
     )
     return
   }
 
-  if ((insertError as { code?: string }).code !== PG_UNIQUE_VIOLATION) {
-    console.error(
-      `[template-webhook] ${kind} for unknown template ${where} — stub insert failed:`,
-      insertError.message,
+  // Conflict: either a concurrent sync/webhook just created the row, or
+  // the account already has a local (user_id, name, language) row that
+  // isn't linked to this meta_template_id. Retry the original UPDATE
+  // once — it covers the first case; the second still needs a sync and
+  // is logged as such.
+  let ids: string[]
+  try {
+    ids = await asService((db) =>
+      updateTemplatesByMetaId(db, metaTemplateId, p.fields),
     )
-    return
-  }
-
-  // Unique violation: either a concurrent sync/webhook just created the
-  // row, or the account already has a local (user_id, name, language)
-  // row that isn't linked to this meta_template_id. Retry the original
-  // UPDATE once — it covers the first case; the second still needs a
-  // sync and is logged as such.
-  const { data, error } = await p.retryUpdate()
-  if (error) {
+  } catch (err) {
     console.error(
       `[template-webhook] ${kind} for unknown template ${where} — retry after unique violation failed:`,
-      error.message,
+      errorMessage(err),
     )
     return
   }
-  if (!data || data.length === 0) {
+  if (ids.length === 0) {
     console.warn(
       `[template-webhook] ${kind} for unknown template ${where} — a local row with the same name/language exists but is not linked to this meta_template_id; run "Sync from Meta" to link it.`,
     )

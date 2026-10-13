@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SupabaseClient } from '@/lib/db';
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: (s: string) => s,
@@ -11,51 +10,31 @@ vi.mock('@/lib/webhooks/ssrf', () => ({
   isDeliverableUrl: vi.fn(async () => true),
 }));
 
+// Repository calls run through asService; the repo module is mocked.
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule());
+vi.mock('@/server/repos/inbound-webhook-endpoints', () => ({
+  listActiveEndpointsForEvent: vi.fn(),
+  markEndpointDelivered: vi.fn(async () => undefined),
+  recordWebhookFailure: vi.fn(async () => undefined),
+}));
+
 import { dispatchWebhookEvent, MAX_CONSECUTIVE_FAILURES } from './deliver';
 import { isDeliverableUrl } from './ssrf';
+import {
+  listActiveEndpointsForEvent,
+  markEndpointDelivered,
+  recordWebhookFailure,
+} from '@/server/repos/inbound-webhook-endpoints';
 
 interface Row {
   id: string;
   url: string;
   secret: string;
 }
-interface Calls {
-  updates: { id: string; payload: Record<string, unknown> }[];
-  rpcs: { name: string; args: Record<string, unknown> }[];
-}
 
-function makeDb(rows: Row[], calls: Calls) {
-  const from = () => {
-    let mode: 'select' | 'update' = 'select';
-    let payload: Record<string, unknown> = {};
-    let id: string | null = null;
-    const b: Record<string, unknown> = {
-      select: () => b,
-      eq: (col: string, val: string) => {
-        if (col === 'id') id = val;
-        return b;
-      },
-      update: (p: Record<string, unknown>) => {
-        mode = 'update';
-        payload = p;
-        return b;
-      },
-      contains: () => Promise.resolve({ data: rows, error: null }),
-      then: (resolve: (v: unknown) => unknown) => {
-        if (mode === 'update' && id) calls.updates.push({ id, payload });
-        return resolve({ data: null, error: null });
-      },
-    };
-    return b;
-  };
-  const rpc = (name: string, args: Record<string, unknown>) => {
-    calls.rpcs.push({ name, args });
-    return Promise.resolve({ data: null, error: null });
-  };
-  return { from, rpc } as unknown as SupabaseClient;
+function endpoints(rows: Row[]) {
+  vi.mocked(listActiveEndpointsForEvent).mockResolvedValue(rows);
 }
-
-const emptyCalls = (): Calls => ({ updates: [], rpcs: [] });
 
 beforeEach(() => {
   vi.mocked(isDeliverableUrl).mockResolvedValue(true);
@@ -67,15 +46,16 @@ describe('dispatchWebhookEvent', () => {
   it('signs + POSTs (no redirect follow) and resets failure_count on success', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
     vi.stubGlobal('fetch', fetchMock);
-    const calls = emptyCalls();
+    endpoints([{ id: 'a', url: 'https://a.test/hook', secret: 's1' }]);
 
-    await dispatchWebhookEvent(
-      makeDb([{ id: 'a', url: 'https://a.test/hook', secret: 's1' }], calls),
+    await dispatchWebhookEvent('acct-1', 'message.received', { x: 1 });
+
+    // Endpoints are looked up for this account + event only.
+    expect(listActiveEndpointsForEvent).toHaveBeenCalledWith(
+      expect.anything(),
       'acct-1',
-      'message.received',
-      { x: 1 }
+      'message.received'
     );
-
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toBe('https://a.test/hook');
@@ -84,52 +64,54 @@ describe('dispatchWebhookEvent', () => {
     expect(opts.headers['X-Wacrm-Signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
     // Payload carries a dedupe id.
     expect(JSON.parse(opts.body).id).toMatch(/[0-9a-f-]{36}/);
-    expect(calls.updates[0]).toMatchObject({ id: 'a', payload: { failure_count: 0 } });
-    expect(calls.rpcs).toHaveLength(0);
+    expect(markEndpointDelivered).toHaveBeenCalledWith(expect.anything(), 'acct-1', 'a');
+    expect(recordWebhookFailure).not.toHaveBeenCalled();
   });
 
   it('records an atomic failure (RPC) when the endpoint errors', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 } as Response));
-    const calls = emptyCalls();
+    endpoints([{ id: 'b', url: 'https://b.test/hook', secret: 's2' }]);
 
-    await dispatchWebhookEvent(
-      makeDb([{ id: 'b', url: 'https://b.test/hook', secret: 's2' }], calls),
-      'acct-1',
-      'message.received',
-      {}
+    await dispatchWebhookEvent('acct-1', 'message.received', {});
+
+    expect(recordWebhookFailure).toHaveBeenCalledWith(
+      expect.anything(),
+      'b',
+      MAX_CONSECUTIVE_FAILURES
     );
-
-    expect(calls.rpcs[0]).toEqual({
-      name: 'record_webhook_failure',
-      args: { endpoint_id: 'b', max_failures: MAX_CONSECUTIVE_FAILURES },
-    });
-    expect(calls.updates).toHaveLength(0);
+    expect(markEndpointDelivered).not.toHaveBeenCalled();
   });
 
   it('blocks a non-public target (SSRF guard) without fetching', async () => {
     vi.mocked(isDeliverableUrl).mockResolvedValue(false);
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const calls = emptyCalls();
+    endpoints([{ id: 'c', url: 'https://127.0.0.1/hook', secret: 's3' }]);
 
-    await dispatchWebhookEvent(
-      makeDb([{ id: 'c', url: 'https://127.0.0.1/hook', secret: 's3' }], calls),
-      'acct-1',
-      'message.received',
-      {}
-    );
+    await dispatchWebhookEvent('acct-1', 'message.received', {});
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(calls.rpcs[0].name).toBe('record_webhook_failure');
+    expect(recordWebhookFailure).toHaveBeenCalledWith(expect.anything(), 'c', MAX_CONSECUTIVE_FAILURES);
   });
 
   it('does nothing when no endpoints are subscribed', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const calls = emptyCalls();
-    await dispatchWebhookEvent(makeDb([], calls), 'acct-1', 'message.received', {});
+    endpoints([]);
+
+    await dispatchWebhookEvent('acct-1', 'message.received', {});
+
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(calls.rpcs).toHaveLength(0);
-    expect(calls.updates).toHaveLength(0);
+    expect(recordWebhookFailure).not.toHaveBeenCalled();
+    expect(markEndpointDelivered).not.toHaveBeenCalled();
+  });
+
+  it('never throws when the endpoint lookup fails', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(listActiveEndpointsForEvent).mockRejectedValue(new Error('db down'));
+
+    await expect(dispatchWebhookEvent('acct-1', 'message.received', {})).resolves.toBeUndefined();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

@@ -1,4 +1,5 @@
 import { downloadMedia } from "./meta-api";
+import { adminStorage } from "@/lib/storage/server";
 import { extensionForMime } from "@/lib/media/filename";
 import { buildMediaPath, MEDIA_MAX_BYTES } from "@/lib/storage/upload-media";
 
@@ -47,8 +48,11 @@ export const MIRROR_BUCKET = "chat-media";
 export const MIRROR_FOLDER = "inbound";
 
 export interface MirrorInboundMediaArgs {
-  /** Service-role `supabase.storage` — RLS is bypassed, MIME/size limits are not. */
-  storage: MirrorStorage;
+  /**
+   * Service-role Storage — RLS is bypassed, MIME/size limits are not.
+   * Defaults to `adminStorage()`; injected in tests.
+   */
+  storage?: MirrorStorage;
   /** Tenant. Drives the account-scoped path the bucket's policies expect. */
   accountId: string;
   /** Meta's media id. Makes the object path deterministic. */
@@ -150,7 +154,7 @@ export async function mirrorInboundMedia(
   args: MirrorInboundMediaArgs,
 ): Promise<string | null> {
   const {
-    storage,
+    storage = adminStorage(),
     accountId,
     mediaId,
     downloadUrl,

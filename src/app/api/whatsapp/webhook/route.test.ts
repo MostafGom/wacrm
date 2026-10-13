@@ -8,15 +8,23 @@ const h = vi.hoisted(() => ({
   dispatchInboundToAiReply: vi.fn(),
   dispatchWebhookEvent: vi.fn(),
   state: {
-    // Result the message upsert's .select() resolves to. A genuine insert
-    // returns the row; a replayed delivery conflicts and returns [].
-    messageUpsertResult: [{ id: 'msg-1' }] as { id: string }[],
+    // What insertInboundMessage resolves to. A genuine insert returns the
+    // new id; a replayed delivery conflicts and returns null.
+    messageInsertedId: 'msg-1' as string | null,
     priorCustomerMsgCount: 0,
     /** Row `lookupInternalIdByMetaId` resolves for a `context.id`. */
     replyContextParent: null as { id: string } | null,
-    conversation: { id: 'conv-1', unread_count: 0, account_id: 'acc-1' },
-    upsertCalls: [] as { row: Record<string, unknown>; options: unknown }[],
-    rpcCalls: [] as { name: string; args: Record<string, unknown> }[],
+    conversation: { id: 'conv-1', unread_count: 0, account_id: 'acc-1', status: 'open' },
+    /** Rows handed to insertInboundMessage. */
+    messageInserts: [] as Record<string, unknown>[],
+    /** bump_conversation_on_inbound calls (#369). */
+    bumpCalls: [] as { conversationId: string; lastMessageText: string }[],
+    /** phone_number_ids the config lookup was asked for. */
+    configLookups: [] as string[],
+    /** When true, no whatsapp_config owns the phone number. */
+    configMissing: false,
+    /** Configs the GET handshake checks verify tokens against. */
+    verifyTokenConfigs: [] as { id: string; verify_token: string | null }[],
     afterCallbacks: [] as (() => Promise<void> | void)[],
     automationStarted: 0,
     automationCompleted: 0,
@@ -38,6 +46,10 @@ const h = vi.hoisted(() => ({
     contactUpdates: [] as Record<string, unknown>[],
     /** Patches applied to `messages` by a status webhook (#535). */
     messageUpdates: [] as Record<string, unknown>[],
+    /** Account each status-webhook message update was scoped to. */
+    messageStatusScopes: [] as string[],
+    /** Conversation the status update matched (drives the fan-out). */
+    statusConversationId: null as string | null,
     /** Row the status webhook's broadcast_recipients lookup resolves. */
     broadcastRecipient: null as { id: string; status: string } | null,
     /** Patches applied to that broadcast_recipients row. */
@@ -54,195 +66,105 @@ vi.mock('next/server', () => ({
   },
 }))
 
-vi.mock('@/lib/db/admin', () => ({
-  supabaseAdmin: () => ({
-    from(table: string) {
-      switch (table) {
-        case 'whatsapp_config':
-          return {
-            select: () => ({
-              eq: () =>
-                Promise.resolve({
-                  data: [
-                    {
-                      account_id: 'acc-1',
-                      user_id: 'user-1',
-                      access_token: 'enc',
-                      mirror_inbound_media: h.state.mirrorInboundMedia,
-                    },
-                  ],
-                  error: null,
-                }),
-            }),
-          }
-        case 'conversations':
-          // findOrCreateConversation: select().eq().eq().order().limit()
-          return {
-            select: () => ({
-              eq: () => ({
-                eq: () => ({
-                  order: () => ({
-                    limit: () =>
-                      Promise.resolve({
-                        data: [h.state.conversation],
-                        error: null,
-                      }),
-                  }),
-                }),
-              }),
-            }),
-          }
-        case 'broadcast_recipients':
-          // Two chains land here:
-          //   flagBroadcastReplyIfAny: select().eq().eq().in().order().limit()
-          //   handleStatusUpdate:      select().eq().maybeSingle(), then
-          //                            update().eq()
-          return {
-            select: () => ({
-              eq: () => ({
-                eq: () => ({
-                  in: () => ({
-                    order: () => ({
-                      limit: () =>
-                        Promise.resolve({ data: [], error: null }),
-                    }),
-                  }),
-                }),
-                maybeSingle: () =>
-                  Promise.resolve({
-                    data: h.state.broadcastRecipient,
-                    error: null,
-                  }),
-              }),
-            }),
-            update: (patch: Record<string, unknown>) => {
-              h.state.recipientUpdates.push(patch)
-              return { eq: () => Promise.resolve({ error: null }) }
-            },
-          }
-        case 'contacts':
-          // Three chains land here, all from findOrCreateContact:
-          //   findContactByWaUserId: select('*').eq().eq().maybeSingle()
-          //   identity backfill:     update().eq().select().maybeSingle()
-          //   create:                insert().select().single()
-          return {
-            select: () => ({
-              eq: () => ({
-                eq: () => ({
-                  maybeSingle: () =>
-                    Promise.resolve({
-                      data: h.state.contactByWaUserId,
-                      error: null,
-                    }),
-                }),
-              }),
-            }),
-            update: (patch: Record<string, unknown>) => {
-              h.state.contactUpdates.push(patch)
-              return {
-                eq: () => ({
-                  select: () => ({
-                    maybeSingle: () =>
-                      Promise.resolve({ data: null, error: null }),
-                  }),
-                }),
-              }
-            },
-            insert: (row: Record<string, unknown>) => {
-              h.state.contactInserts.push(row)
-              return {
-                select: () => ({
-                  single: () =>
-                    Promise.resolve({
-                      data: { id: 'contact-new', ...row },
-                      error: null,
-                    }),
-                }),
-              }
-            },
-          }
-        case 'messages':
-          return {
-            // Two different chains land here, told apart by the count
-            // option: the prior-message count (head request) and the
-            // reply-context parent lookup.
-            select: (_columns: string, options?: { head?: boolean }) =>
-              options?.head
-                ? // priorCustomerMsgCount: select('id',{count,head}).eq().eq()
-                  {
-                    eq: () => ({
-                      eq: () =>
-                        Promise.resolve({
-                          count: h.state.priorCustomerMsgCount,
-                          error: null,
-                        }),
-                    }),
-                  }
-                : // lookupInternalIdByMetaId: select('id').eq().eq().maybeSingle()
-                  // handleStatusUpdate fan-out: select().eq().limit().maybeSingle()
-                  {
-                    eq: () => ({
-                      eq: () => ({
-                        maybeSingle: () =>
-                          Promise.resolve({
-                            data: h.state.replyContextParent,
-                            error: null,
-                          }),
-                      }),
-                      limit: () => ({
-                        maybeSingle: () =>
-                          Promise.resolve({ data: null, error: null }),
-                      }),
-                    }),
-                  },
-            // Status webhook mirror (#535): update(...).eq('message_id', ...)
-            update: (patch: Record<string, unknown>) => {
-              h.state.messageUpdates.push(patch)
-              return { eq: () => Promise.resolve({ error: null }) }
-            },
-            // Idempotent insert: upsert(...).select('id')
-            upsert: (row: Record<string, unknown>, options: unknown) => {
-              h.state.upsertCalls.push({ row, options })
-              return {
-                select: () =>
-                  Promise.resolve({
-                    data: h.state.messageUpsertResult,
-                    error: null,
-                  }),
-              }
-            },
-          }
-        default:
-          throw new Error(`unexpected table: ${table}`)
-      }
-    },
-    rpc: (name: string, args: Record<string, unknown>) => {
-      h.state.rpcCalls.push({ name, args })
-      return Promise.resolve({ data: null, error: null })
-    },
-    // Service-role Storage, used by the inbound-media mirror (#466).
-    storage: {
-      from(bucket: string) {
-        return {
-          upload: (
-            path: string,
-            _body: unknown,
-            options: { contentType?: string },
-          ) => {
-            h.state.storageUploads.push({ bucket, path, options })
-            return Promise.resolve({ error: h.state.storageUploadError })
+// ------------------------------------------------------------
+// Repositories. asService just runs the callback (dbModule), and each
+// repo function reads / records `h.state`, so the tests assert on what
+// the webhook asked the database to do. The SQL behind each function
+// (ON CONFLICT targets, account scoping, the RPCs) is covered against
+// real Postgres in src/server/repos/inbound-*.int.test.ts.
+// ------------------------------------------------------------
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+
+vi.mock('@/server/repos/inbound-config', () => ({
+  listVerifyTokenConfigs: vi.fn(async () => h.state.verifyTokenConfigs),
+  setConfigVerifyToken: vi.fn(async () => undefined),
+  listConfigsByPhoneNumberId: vi.fn(async (_db: unknown, phoneNumberId: string) => {
+    h.state.configLookups.push(phoneNumberId)
+    return h.state.configMissing
+      ? []
+      : [
+          {
+            account_id: 'acc-1',
+            user_id: 'user-1',
+            access_token: 'enc',
+            mirror_inbound_media: h.state.mirrorInboundMedia,
           },
-          getPublicUrl: (path: string) => ({
-            data: { publicUrl: `https://cdn.test/${bucket}/${path}` },
-          }),
-        }
-      },
-    },
+        ]
   }),
 }))
 
-// Repository calls go through asService; the repo modules are mocked.
-vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+vi.mock('@/server/repos/inbound-messages', () => ({
+  // findOrCreateContact
+  findContactByWaUserId: vi.fn(async () => h.state.contactByWaUserId),
+  updateContactIdentity: vi.fn(
+    async (_db: unknown, _accountId: string, _id: string, patch: Record<string, unknown>) => {
+      h.state.contactUpdates.push(patch)
+      return null
+    },
+  ),
+  insertInboundContact: vi.fn(async (_db: unknown, row: Record<string, unknown>) => {
+    h.state.contactInserts.push(row)
+    return { id: 'contact-new', ...row }
+  }),
+  // findOrCreateConversation
+  findOldestConversation: vi.fn(async () => h.state.conversation),
+  insertInboundConversation: vi.fn(async () => null),
+  // the inbound message itself
+  findMessageIdByMetaId: vi.fn(async () => h.state.replyContextParent?.id ?? null),
+  countCustomerMessages: vi.fn(async () => h.state.priorCustomerMsgCount),
+  insertInboundMessage: vi.fn(async (_db: unknown, row: Record<string, unknown>) => {
+    h.state.messageInserts.push(row)
+    // A genuine insert returns the new id; a replayed delivery hits the
+    // (conversation_id, message_id) unique index and returns null.
+    return h.state.messageInsertedId
+  }),
+  bumpConversationOnInbound: vi.fn(
+    async (_db: unknown, conversationId: string, lastMessageText: string) => {
+      h.state.bumpCalls.push({ conversationId, lastMessageText })
+    },
+  ),
+  reopenConversationIfClosed: vi.fn(async () => true),
+  markLatestBroadcastReplied: vi.fn(async () => null),
+  deleteCustomerReaction: vi.fn(async () => undefined),
+  upsertCustomerReaction: vi.fn(async () => undefined),
+}))
+
+vi.mock('@/server/repos/inbound-statuses', () => ({
+  updateMessageStatusByWamid: vi.fn(
+    async (_db: unknown, accountId: string, _wamid: string, patch: Record<string, unknown>) => {
+      h.state.messageStatusScopes.push(accountId)
+      h.state.messageUpdates.push(patch)
+      return h.state.statusConversationId
+    },
+  ),
+  findBroadcastRecipientByWamid: vi.fn(async () => h.state.broadcastRecipient),
+  updateBroadcastRecipient: vi.fn(
+    async (_db: unknown, _id: string, patch: Record<string, unknown>) => {
+      h.state.recipientUpdates.push(patch)
+    },
+  ),
+}))
+
+// Service-role Storage, used by the inbound-media mirror (#466).
+vi.mock('@/lib/storage/server', () => ({
+  adminStorage: () => ({
+    from(bucket: string) {
+      return {
+        upload: (
+          path: string,
+          _body: unknown,
+          options: { contentType?: string },
+        ) => {
+          h.state.storageUploads.push({ bucket, path, options })
+          return Promise.resolve({ error: h.state.storageUploadError })
+        },
+        getPublicUrl: (path: string) => ({
+          data: { publicUrl: `https://cdn.test/${bucket}/${path}` },
+        }),
+      }
+    },
+  }),
+}))
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: () => 'plain-token',
@@ -259,7 +181,6 @@ vi.mock('@/lib/contacts/dedupe', () => ({
     name: 'Ada',
     phone: '15551230000',
   })),
-  isUniqueViolation: () => false,
 }))
 
 vi.mock('@/lib/whatsapp/webhook-signature', () => ({
@@ -284,10 +205,19 @@ vi.mock('@/lib/webhooks/deliver', () => ({
   dispatchWebhookEvent: h.dispatchWebhookEvent,
 }))
 
-import { POST } from './route'
+import { GET, POST } from './route'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { findExistingContact } from '@/lib/contacts/dedupe'
 import { handleTemplateWebhookChange } from '@/lib/whatsapp/template-webhook'
+import {
+  bumpConversationOnInbound,
+  findOldestConversation,
+  insertInboundConversation,
+  insertInboundMessage,
+  markLatestBroadcastReplied,
+  reopenConversationIfClosed,
+} from '@/server/repos/inbound-messages'
+import { setConfigVerifyToken } from '@/server/repos/inbound-config'
 
 const mockGetMediaUrl = vi.mocked(getMediaUrl)
 const mockDownloadMedia = vi.mocked(downloadMedia)
@@ -366,12 +296,15 @@ async function runStatusWebhook(status: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  h.state.messageUpsertResult = [{ id: 'msg-1' }]
+  h.state.messageInsertedId = 'msg-1'
   h.state.priorCustomerMsgCount = 0
   h.state.replyContextParent = null
-  h.state.conversation = { id: 'conv-1', unread_count: 0, account_id: 'acc-1' }
-  h.state.upsertCalls = []
-  h.state.rpcCalls = []
+  h.state.conversation = { id: 'conv-1', unread_count: 0, account_id: 'acc-1', status: 'open' }
+  h.state.messageInserts = []
+  h.state.bumpCalls = []
+  h.state.configLookups = []
+  h.state.configMissing = false
+  h.state.verifyTokenConfigs = []
   h.state.afterCallbacks = []
   h.state.automationStarted = 0
   h.state.automationCompleted = 0
@@ -382,6 +315,8 @@ beforeEach(() => {
   h.state.contactInserts = []
   h.state.contactUpdates = []
   h.state.messageUpdates = []
+  h.state.messageStatusScopes = []
+  h.state.statusConversationId = null
   h.state.broadcastRecipient = null
   h.state.recipientUpdates = []
   mockFindExistingContact.mockResolvedValue({
@@ -417,31 +352,47 @@ describe('inbound webhook: idempotent insert (#367)', () => {
   it('a genuine first delivery persists once and fans out downstream', async () => {
     await runWebhook()
 
-    // Inserted via upsert with the (conversation_id, message_id) conflict
-    // target — not a bare insert.
-    expect(h.state.upsertCalls).toHaveLength(1)
-    expect(h.state.upsertCalls[0].options).toMatchObject({
-      onConflict: 'conversation_id,message_id',
-      ignoreDuplicates: true,
+    // Inserted through the idempotent repo insert (ON CONFLICT
+    // (conversation_id, message_id) DO NOTHING — see
+    // inbound-messages.int.test.ts), keyed on Meta's wamid.
+    expect(h.state.messageInserts).toHaveLength(1)
+    expect(h.state.messageInserts[0]).toMatchObject({
+      conversation_id: 'conv-1',
+      message_id: 'wamid.TEST1',
+      sender_type: 'customer',
     })
     // Downstream side effects ran exactly once.
-    expect(h.state.rpcCalls).toHaveLength(1)
+    expect(h.state.bumpCalls).toHaveLength(1)
     expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
     expect(h.dispatchWebhookEvent).toHaveBeenCalledTimes(1)
   })
 
   it('a replayed delivery is a no-op: no unread bump, no fan-out', async () => {
-    // Upsert hits the unique index and returns no row.
-    h.state.messageUpsertResult = []
+    // The insert hits the unique index and returns no row.
+    h.state.messageInsertedId = null
 
     await runWebhook()
 
-    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.messageInserts).toHaveLength(1)
     // None of the downstream side effects fire on a replay.
-    expect(h.state.rpcCalls).toHaveLength(0)
+    expect(h.state.bumpCalls).toHaveLength(0)
     expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
     expect(h.runAutomationsForTrigger).not.toHaveBeenCalled()
     expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
+    expect(h.dispatchWebhookEvent).not.toHaveBeenCalled()
+  })
+
+  it('a failed insert drops the message without any fan-out', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(insertInboundMessage).mockRejectedValueOnce(new Error('check constraint'))
+    try {
+      await runWebhook()
+    } finally {
+      err.mockRestore()
+    }
+
+    expect(h.state.bumpCalls).toHaveLength(0)
+    expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
     expect(h.dispatchWebhookEvent).not.toHaveBeenCalled()
   })
 })
@@ -450,11 +401,114 @@ describe('inbound webhook: atomic unread bump (#369)', () => {
   it('increments unread through the DB-side RPC, not a read-modify-write', async () => {
     await runWebhook()
 
-    expect(h.state.rpcCalls).toHaveLength(1)
-    expect(h.state.rpcCalls[0]).toMatchObject({
-      name: 'bump_conversation_on_inbound',
-      args: { p_conversation_id: 'conv-1' },
+    expect(h.state.bumpCalls).toEqual([
+      { conversationId: 'conv-1', lastMessageText: 'hello' },
+    ])
+  })
+
+  it('a failed bump does not stop downstream processing (message already committed)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(bumpConversationOnInbound).mockRejectedValueOnce(new Error('boom'))
+    try {
+      await runWebhook()
+    } finally {
+      err.mockRestore()
+    }
+
+    expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
+    expect(h.dispatchWebhookEvent).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('inbound webhook: account scoping', () => {
+  it('resolves the account from the delivery phone_number_id', async () => {
+    await runWebhook()
+
+    expect(h.state.configLookups).toEqual(['pn-1'])
+    expect(h.dispatchInboundToFlows).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acc-1', userId: 'user-1' }),
+    )
+  })
+
+  it('drops a delivery for a phone number no config owns', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    h.state.configMissing = true
+    try {
+      const res = await runWebhook()
+      expect(
+        (res as unknown as { init?: { status?: number } }).init?.status,
+      ).toBe(200)
+    } finally {
+      err.mockRestore()
+    }
+
+    expect(h.state.messageInserts).toHaveLength(0)
+    expect(h.state.contactInserts).toHaveLength(0)
+  })
+})
+
+describe('inbound webhook: closed conversations re-open (#409)', () => {
+  it('re-opens a closed thread when the customer writes again', async () => {
+    h.state.conversation = { ...h.state.conversation, status: 'closed' }
+
+    await runWebhook()
+
+    expect(reopenConversationIfClosed).toHaveBeenCalledWith(
+      expect.anything(),
+      'acc-1',
+      'conv-1',
+    )
+  })
+
+  it('leaves an open thread alone', async () => {
+    await runWebhook()
+    expect(reopenConversationIfClosed).not.toHaveBeenCalled()
+  })
+})
+
+describe('inbound webhook: downstream dispatch order', () => {
+  it('opens the conversation, then flows, waiting automations, triggers, AI, message.received', async () => {
+    const order: string[] = []
+    vi.mocked(insertInboundConversation).mockImplementationOnce(async () => ({
+      ...h.state.conversation,
+    }) as never)
+    vi.mocked(findOldestConversation).mockResolvedValueOnce(null)
+    h.dispatchWebhookEvent.mockImplementation(async (_acc: string, event: string) => {
+      order.push(event)
     })
+    h.dispatchInboundToFlows.mockImplementation(async () => {
+      order.push('flows')
+      return { consumed: false }
+    })
+    h.resumeAwaitingReply.mockImplementation(async () => {
+      order.push('resume')
+      return false
+    })
+    h.runAutomationsForTrigger.mockImplementation(async (a: { triggerType: string }) => {
+      order.push(`trigger:${a.triggerType}`)
+    })
+    h.dispatchInboundToAiReply.mockImplementation(async () => {
+      order.push('ai')
+    })
+
+    await runWebhook()
+
+    expect(order).toEqual([
+      'conversation.created',
+      'flows',
+      'resume',
+      'trigger:first_inbound_message',
+      'trigger:new_message_received',
+      'trigger:keyword_match',
+      'ai',
+      'message.received',
+    ])
+    // flagBroadcastReplyIfAny ran for the account's contact.
+    expect(markLatestBroadcastReplied).toHaveBeenCalledWith(
+      expect.anything(),
+      'acc-1',
+      'contact-1',
+    )
   })
 })
 
@@ -475,8 +529,8 @@ describe('inbound webhook: template quick-reply buttons (#478)', () => {
   it('stores the tap as an interactive reply, not an unsupported message', async () => {
     await runWebhook(templateButtonTap)
 
-    expect(h.state.upsertCalls).toHaveLength(1)
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts).toHaveLength(1)
+    expect(h.state.messageInserts[0]).toMatchObject({
       content_type: 'interactive',
       content_text: 'Yes, interested',
       interactive_reply_id: 'YES_INTERESTED',
@@ -512,7 +566,7 @@ describe('inbound webhook: template quick-reply buttons (#478)', () => {
       button: { text: 'Track my order' },
     })
 
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts[0]).toMatchObject({
       content_type: 'interactive',
       content_text: 'Track my order',
       interactive_reply_id: 'Track my order',
@@ -537,7 +591,7 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
     expect(h.state.storageUploads[0].path).toBe(
       'account-acc-1/inbound/1234567890123456-image-1700000000.jpg',
     )
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts[0]).toMatchObject({
       media_url:
         'https://cdn.test/chat-media/account-acc-1/inbound/1234567890123456-image-1700000000.jpg',
       // Meta's MIME type used to be discarded outright (`void mediaType`).
@@ -552,8 +606,8 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 
     // The message still lands, and it still lands with a usable URL —
     // the mirror failing must never cost us the message.
-    expect(h.state.upsertCalls).toHaveLength(1)
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts).toHaveLength(1)
+    expect(h.state.messageInserts[0]).toMatchObject({
       media_url: '/api/whatsapp/media/1234567890123456',
       media_type: 'image/jpeg',
     })
@@ -564,7 +618,7 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 
     await runWebhook(IMAGE_MESSAGE)
 
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts[0]).toMatchObject({
       media_url: '/api/whatsapp/media/1234567890123456',
     })
   })
@@ -590,7 +644,7 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 
     expect(mockDownloadMedia).not.toHaveBeenCalled()
     expect(h.state.storageUploads).toHaveLength(0)
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts[0]).toMatchObject({
       media_url: '/api/whatsapp/media/999',
       media_type: 'application/pdf',
     })
@@ -632,7 +686,7 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 
     expect(mockDownloadMedia).not.toHaveBeenCalled()
     expect(h.state.storageUploads).toHaveLength(0)
-    expect(h.state.upsertCalls[0].row).toMatchObject({
+    expect(h.state.messageInserts[0]).toMatchObject({
       media_url: '/api/whatsapp/media/1234567890123456',
       // Still recorded — the MIME type costs nothing and makes the
       // download name right even for proxied media.
@@ -653,7 +707,7 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 
     expect(mockGetMediaUrl).not.toHaveBeenCalled()
     expect(h.state.storageUploads).toHaveLength(0)
-    expect(h.state.upsertCalls[0].row).toMatchObject({ media_type: null })
+    expect(h.state.messageInserts[0]).toMatchObject({ media_type: null })
   })
 })
 
@@ -718,7 +772,7 @@ describe('inbound webhook: business-scoped user IDs (#519)', () => {
       name: 'Sheena Nelson',
     })
     // The message still lands in the thread.
-    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.messageInserts).toHaveLength(1)
   })
 
   it('never looks the sender up by phone when there is no phone', async () => {
@@ -828,7 +882,7 @@ describe('inbound webhook: business-scoped user IDs (#519)', () => {
     )
 
     expect(h.state.contactInserts).toHaveLength(0)
-    expect(h.state.upsertCalls).toHaveLength(0)
+    expect(h.state.messageInserts).toHaveLength(0)
     // Still a 200 — Meta must not be told to retry a payload we can
     // never process.
     expect(
@@ -846,7 +900,7 @@ describe('inbound webhook: business-scoped user IDs (#519)', () => {
     )
     expect(h.state.contactInserts).toHaveLength(0)
     expect(h.state.contactUpdates).toHaveLength(0)
-    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.messageInserts).toHaveLength(1)
   })
 })
 
@@ -913,7 +967,7 @@ describe('template-lifecycle webhooks: WABA id is threaded to the handler (#534)
       wabaId: 'WABA-1',
     })
     // A template event must not fall through to the messaging branch.
-    expect(h.state.upsertCalls).toHaveLength(0)
+    expect(h.state.messageInserts).toHaveLength(0)
   })
 })
 
@@ -1055,5 +1109,110 @@ describe('inbound webhook: automation waiting for a reply', () => {
     await runWebhook()
 
     expect(h.resumeAwaitingReply).not.toHaveBeenCalled()
+  })
+})
+
+describe('status webhook: ladder + account scoping', () => {
+  const status = (s: string) => ({
+    id: 'wamid.OUT2',
+    status: s,
+    timestamp: '1700000200',
+    recipient_id: '15551230000',
+  })
+
+  it('scopes the messages mirror to the phone number owner', async () => {
+    await runStatusWebhook(status('read'))
+
+    expect(h.state.configLookups).toEqual(['pn-1'])
+    expect(h.state.messageStatusScopes).toEqual(['acc-1'])
+  })
+
+  it('moves a recipient forward and stamps the matching timestamp', async () => {
+    h.state.broadcastRecipient = { id: 'rec-1', status: 'delivered' }
+
+    await runStatusWebhook(status('read'))
+
+    expect(h.state.recipientUpdates).toEqual([
+      { status: 'read', read_at: new Date(1700000200 * 1000).toISOString() },
+    ])
+  })
+
+  it('never regresses a recipient down the ladder on a replayed status', async () => {
+    h.state.broadcastRecipient = { id: 'rec-1', status: 'read' }
+
+    await runStatusWebhook(status('delivered'))
+
+    expect(h.state.recipientUpdates).toHaveLength(0)
+  })
+
+  it('refuses `failed` once the recipient was delivered', async () => {
+    h.state.broadcastRecipient = { id: 'rec-1', status: 'delivered' }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await runStatusWebhook(status('failed'))
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(h.state.recipientUpdates).toHaveLength(0)
+  })
+
+  it('fans out message.status_updated only when one of our messages matched', async () => {
+    await runStatusWebhook(status('delivered'))
+    expect(h.dispatchWebhookEvent).not.toHaveBeenCalled()
+
+    h.state.afterCallbacks = []
+    h.state.statusConversationId = 'conv-9'
+    await runStatusWebhook(status('delivered'))
+    expect(h.dispatchWebhookEvent).toHaveBeenCalledWith(
+      'acc-1',
+      'message.status_updated',
+      {
+        whatsapp_message_id: 'wamid.OUT2',
+        conversation_id: 'conv-9',
+        status: 'delivered',
+      },
+    )
+  })
+
+  it('ignores statuses for a phone number no config owns', async () => {
+    h.state.configMissing = true
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await runStatusWebhook(status('delivered'))
+    } finally {
+      err.mockRestore()
+    }
+
+    expect(h.state.messageUpdates).toHaveLength(0)
+  })
+})
+
+describe('GET: verify-token handshake', () => {
+  const verifyRequest = (token: string) =>
+    new Request(
+      `https://crm.test/api/whatsapp/webhook?hub.mode=subscribe&hub.challenge=CH-42&hub.verify_token=${token}`,
+    )
+
+  it('echoes the challenge when a config token decrypts to the given value', async () => {
+    // The encryption mock decrypts everything to 'plain-token'.
+    h.state.verifyTokenConfigs = [{ id: 'cfg-1', verify_token: 'enc' }]
+
+    const res = (await GET(verifyRequest('plain-token'))) as Response
+
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('CH-42')
+    // Not a legacy-format token, so no re-encrypt write.
+    expect(setConfigVerifyToken).not.toHaveBeenCalled()
+  })
+
+  it('rejects a token no config holds', async () => {
+    h.state.verifyTokenConfigs = [{ id: 'cfg-1', verify_token: 'enc' }]
+
+    const res = (await GET(verifyRequest('wrong'))) as unknown as {
+      init?: { status?: number }
+    }
+
+    expect(res.init?.status).toBe(403)
   })
 })
