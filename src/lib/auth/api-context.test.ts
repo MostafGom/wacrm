@@ -5,9 +5,10 @@ import type { ApiKeyRow } from "@/lib/api-keys/store";
 import { ApiError } from "@/lib/api/v1/respond";
 import { __resetRateLimitForTests, RATE_LIMITS } from "@/lib/rate-limit";
 
-// Mock the service-role client factory — requireApiKey only stashes
-// the returned client in the context; tests never call through it.
-vi.mock("@/lib/flows/admin-client", () => ({
+// Transitional: requireApiKey still stashes a service-role client in
+// the context for not-yet-converted /api/v1 routes; tests never call
+// through it.
+vi.mock("@/lib/db/admin", () => ({
   supabaseAdmin: () => ({ __isMockAdminClient: true }),
 }));
 
@@ -16,7 +17,7 @@ const findActiveKeyByHash = vi.fn<(hash: string) => Promise<ApiKeyRow | null>>()
 const touchLastUsed = vi.fn();
 vi.mock("@/lib/api-keys/store", () => ({
   findActiveKeyByHash: (hash: string) => findActiveKeyByHash(hash),
-  touchLastUsed: (id: string) => touchLastUsed(id),
+  touchLastUsed: (id: string, accountId: string) => touchLastUsed(id, accountId),
 }));
 
 // Import AFTER the mocks are registered.
@@ -93,7 +94,7 @@ describe("requireApiKey", () => {
     expect(ctx.accountId).toBe("acct-1");
     expect(ctx.keyId).toBe("key-1");
     expect(ctx.scopes).toEqual(["messages:send"]);
-    expect(touchLastUsed).toHaveBeenCalledWith("key-1");
+    expect(touchLastUsed).toHaveBeenCalledWith("key-1", "acct-1");
   });
 
   it("accepts a bare key without the 'Bearer ' prefix", async () => {

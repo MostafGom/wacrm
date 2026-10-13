@@ -15,7 +15,6 @@
 // ============================================================
 
 import { NextResponse } from "next/server";
-import type { PostgrestError } from "@/lib/db";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { isAccountRole } from "@/lib/auth/roles";
@@ -25,18 +24,22 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import {
+  membershipRpcError,
+  removeAccountMember,
+  setMemberRole,
+} from "@/server/repos/members";
 
 const t = getT("Api");
 
 // Map known SQLSTATEs from the RPCs (see migration 018) onto HTTP
-// statuses. The `error.code` field is the SQLSTATE; the `message`
-// is the human-readable RAISE message we put in the migration.
-function rpcErrorToResponse(err: PostgrestError): NextResponse {
-  if (err.code === "42501") {
-    return NextResponse.json({ error: err.message }, { status: 403 });
-  }
-  if (err.code === "22023") {
-    return NextResponse.json({ error: err.message }, { status: 400 });
+// statuses: 42501 → 403, 22023 → 400, with the human-readable RAISE
+// message from the migration. Anything else is a 500.
+function rpcErrorToResponse(err: unknown): NextResponse {
+  const known = membershipRpcError(err);
+  if (known) {
+    return NextResponse.json({ error: known.message }, { status: known.status });
   }
   console.error("[members route] unexpected RPC error:", err);
   return NextResponse.json(
@@ -84,12 +87,11 @@ export async function PATCH(
       );
     }
 
-    const { error } = await ctx.supabase.rpc("set_member_role", {
-      p_user_id: userId,
-      p_new_role: role,
-    });
-
-    if (error) return rpcErrorToResponse(error);
+    try {
+      await asUser(ctx.userId, (db) => setMemberRole(db, userId, role));
+    } catch (error) {
+      return rpcErrorToResponse(error);
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {
@@ -112,13 +114,14 @@ export async function DELETE(
 
     const { userId } = await params;
 
-    const { data, error } = await ctx.supabase.rpc("remove_account_member", {
-      p_user_id: userId,
-    });
+    let newPersonalAccountId: string | null;
+    try {
+      newPersonalAccountId = await asUser(ctx.userId, (db) => removeAccountMember(db, userId));
+    } catch (error) {
+      return rpcErrorToResponse(error);
+    }
 
-    if (error) return rpcErrorToResponse(error);
-
-    return NextResponse.json({ ok: true, newPersonalAccountId: data });
+    return NextResponse.json({ ok: true, newPersonalAccountId });
   } catch (err) {
     return toErrorResponse(err);
   }

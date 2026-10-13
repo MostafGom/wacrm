@@ -14,7 +14,11 @@ import {
   AlertTriangle,
   RotateCcw,
 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+import {
+  fetchWhatsAppConfigView,
+  saveMirrorInboundMedia,
+  type WhatsAppConfigView,
+} from '@/lib/settings/settings-api';
 import { useAuth } from '@/hooks/use-auth';
 import { useTranslations } from 'next-intl';
 import { Button } from '@/components/ui/button';
@@ -30,7 +34,6 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from '@/components/ui/accordion';
-import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
 
 const MASKED_TOKEN = '••••••••••••••••';
 
@@ -62,7 +65,6 @@ type WabaSubscription = {
 
 export function WhatsAppConfig() {
   const t = useTranslations('Settings.whatsapp');
-  const supabase = createClient();
   // After multi-user, whatsapp_config is one-row-per-account, not
   // one-row-per-user. We pull `accountId` straight off the auth
   // context and key every read off it — so a teammate who just
@@ -81,7 +83,7 @@ export function WhatsAppConfig() {
   const [testing, setTesting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [showToken, setShowToken] = useState(false);
-  const [config, setConfig] = useState<WhatsAppConfigType | null>(null);
+  const [config, setConfig] = useState<WhatsAppConfigView | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('unknown');
   const [resetReason, setResetReason] = useState<ResetReason>(null);
   const [statusMessage, setStatusMessage] = useState<string>('');
@@ -92,10 +94,10 @@ export function WhatsAppConfig() {
   const [wabaSubscription, setWabaSubscription] = useState<WabaSubscription | null>(null);
   // Guards against re-hydrating the form when the load effect below
   // re-runs for reasons unrelated to actually switching accounts —
-  // e.g. Supabase's onAuthStateChange fires a token refresh (new
-  // `user` object, profileLoading flips true/false) when the browser
-  // tab regains focus. Without this, that churn calls fetchConfig()
-  // again and overwrites whatever the user typed but hadn't saved yet.
+  // e.g. an auth state change (new `user` object, profileLoading
+  // flips true/false) when the browser tab regains focus. Without
+  // this, that churn calls fetchConfig() again and overwrites whatever
+  // the user typed but hadn't saved yet.
   const loadedAccountIdRef = useRef<string | null>(null);
 
   const [phoneNumberId, setPhoneNumberId] = useState('');
@@ -110,9 +112,9 @@ export function WhatsAppConfig() {
   // page it is NOT part of handleSave: that path insists on re-entering
   // the access token so it can re-verify with Meta, which is a silly
   // toll to pay for flipping a boolean. The switch writes straight to
-  // the row instead — RLS (migration 017) restricts whatsapp_config
-  // UPDATE to admins, hence the canEditSettings gate below; without it
-  // a viewer's toggle would match zero rows and appear to work.
+  // the row instead (PATCH /api/whatsapp/config/settings) — admin+
+  // only, like the whatsapp_config UPDATE RLS policy, hence the
+  // canEditSettings gate below.
   const [mirrorMedia, setMirrorMedia] = useState(true);
   const [savingMirror, setSavingMirror] = useState(false);
 
@@ -140,34 +142,29 @@ export function WhatsAppConfig() {
       ? `${window.location.origin}/api/whatsapp/webhook`
       : '';
 
-  const fetchConfig = useCallback(async (acctId: string) => {
+  const fetchConfig = useCallback(async () => {
     setLoading(true);
     try {
-      // Load form values from Supabase (shows what's in DB).
-      // Switched from `user_id` (which would only match the row's
-      // original author) to `account_id` so every member of the
-      // account sees the same saved configuration. UNIQUE(account_id)
-      // on the table guarantees the .maybeSingle() return type
-      // remains accurate.
-      const { data, error } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', acctId)
-        .maybeSingle();
+      // Load form values (shows what's in the DB). Keyed by the
+      // caller's account server-side, so every member of the account
+      // sees the same saved configuration (UNIQUE(account_id)). The
+      // encrypted tokens never reach the browser.
+      const { data: res, error } = await fetchWhatsAppConfigView();
 
       if (error) {
         console.error('Failed to load config row:', error);
       }
+      const data = res?.config ?? null;
 
       if (data) {
         setConfig(data);
         setPhoneNumberId(data.phone_number_id || '');
         setWabaId(data.waba_id || '');
         setAccessToken(MASKED_TOKEN);
-        // Same treatment as the access token: the row carries the encrypted
-        // value, which is enough to know one exists. Show a mask instead of
-        // an empty box so nobody concludes the token was never saved.
-        setVerifyToken(data.verify_token ? MASKED_TOKEN : '');
+        // Same treatment as the access token: the server tells us one is
+        // stored. Show a mask instead of an empty box so nobody concludes
+        // the token was never saved.
+        setVerifyToken(data.has_verify_token ? MASKED_TOKEN : '');
         setVerifyEdited(false);
         setPin('');
         setTokenEdited(false);
@@ -224,7 +221,7 @@ export function WhatsAppConfig() {
     } finally {
       setLoading(false);
     }
-  }, [supabase, t]);
+  }, [t]);
 
   useEffect(() => {
     // Need both the auth session (`!authLoading`) AND the profile
@@ -240,7 +237,7 @@ export function WhatsAppConfig() {
     }
     if (loadedAccountIdRef.current === accountId) return;
     loadedAccountIdRef.current = accountId;
-    fetchConfig(accountId);
+    fetchConfig();
   }, [authLoading, profileLoading, user?.id, accountId, fetchConfig]);
 
   async function handleToggleMirrorMedia(next: boolean) {
@@ -251,10 +248,7 @@ export function WhatsAppConfig() {
     setMirrorMedia(next);
     setSavingMirror(true);
     try {
-      const { error } = await supabase
-        .from('whatsapp_config')
-        .update({ mirror_inbound_media: next })
-        .eq('account_id', accountId);
+      const { error } = await saveMirrorInboundMedia(next);
       if (error) throw new Error(error.message);
       setConfig({ ...config, mirror_inbound_media: next });
     } catch (error) {
@@ -289,7 +283,7 @@ export function WhatsAppConfig() {
 
       // Always POST through the API — it verifies with Meta and encrypts
       // the access_token server-side with ENCRYPTION_KEY. Skipping this
-      // and writing direct to Supabase stores the token in plaintext,
+      // and writing straight to the database stores the token in plaintext,
       // which then fails decryption on every subsequent health check.
       const payload: Record<string, unknown> = {
         phone_number_id: phoneNumberId.trim(),
@@ -379,7 +373,7 @@ export function WhatsAppConfig() {
         setPin('');
       }
 
-      if (accountId) await fetchConfig(accountId);
+      if (accountId) await fetchConfig();
     } catch (err) {
       console.error('Save error:', err);
       toast.error(t('saveFailed'));
@@ -439,7 +433,7 @@ export function WhatsAppConfig() {
           { duration: 8000 },
         );
       }
-      if (accountId) await fetchConfig(accountId);
+      if (accountId) await fetchConfig();
     } catch (err) {
       console.error('verify-registration failed:', err);
       toast.error(t('verifyEndpointUnreachable'));
@@ -820,7 +814,7 @@ export function WhatsAppConfig() {
                 className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
               />
               <p className="text-xs text-muted-foreground">
-                {config?.verify_token && !verifyEdited
+                {config?.has_verify_token && !verifyEdited
                   ? t('webhookVerifyTokenSaved')
                   : t('webhookVerifyTokenHint')}
               </p>

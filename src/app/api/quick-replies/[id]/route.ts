@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
-import { supabaseAdmin } from '@/lib/automations/admin-client'
+import { asUser } from '@/server/db'
+import { deleteQuickReply, updateQuickReply, type QuickReplyUpdate } from '@/server/repos/quick-replies'
 import { validateInteractivePayload } from '@/lib/whatsapp/interactive'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('Api')
 
 // Update / delete a single quick reply. Quick replies are account-
-// shared, so every mutation is scoped by `account_id` (the service-role
-// client bypasses the agent-gated RLS, so both the role check and the
-// account scope are enforced here).
+// shared, so every mutation is scoped by `account_id`; agent+ is
+// enforced here and by the quick_replies RLS policies.
 
 export async function PATCH(
   request: Request,
@@ -26,7 +26,7 @@ export async function PATCH(
   const body = await request.json().catch(() => null)
   if (!body) return NextResponse.json({ error: t('common.invalidJson') }, { status: 400 })
 
-  const update: Record<string, unknown> = {}
+  const update: QuickReplyUpdate = {}
   if (typeof body.title === 'string') {
     const title = body.title.trim()
     if (!title) return NextResponse.json({ error: t('common.titleEmpty') }, { status: 400 })
@@ -75,12 +75,11 @@ export async function PATCH(
     return NextResponse.json({ ok: true })
   }
 
-  const { error } = await supabaseAdmin()
-    .from('quick_replies')
-    .update(update)
-    .eq('id', id)
-    .eq('account_id', ctx.accountId)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    await asUser(ctx.userId, (db) => updateQuickReply(db, ctx.accountId, id, update))
+  } catch (err) {
+    return toErrorResponse(err)
+  }
   return NextResponse.json({ ok: true })
 }
 
@@ -96,11 +95,10 @@ export async function DELETE(
     return toErrorResponse(err)
   }
 
-  const { error } = await supabaseAdmin()
-    .from('quick_replies')
-    .delete()
-    .eq('id', id)
-    .eq('account_id', ctx.accountId)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    await asUser(ctx.userId, (db) => deleteQuickReply(db, ctx.accountId, id))
+  } catch (err) {
+    return toErrorResponse(err)
+  }
   return NextResponse.json({ ok: true })
 }

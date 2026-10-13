@@ -19,7 +19,6 @@
 // ============================================================
 
 import { NextResponse } from "next/server";
-import type { PostgrestError } from "@/lib/db";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import {
@@ -28,15 +27,16 @@ import {
   RATE_LIMITS,
 } from "@/lib/rate-limit";
 import { getT } from "@/lib/i18n/translate";
+import { asUser } from "@/server/db";
+import { membershipRpcError, transferAccountOwnership } from "@/server/repos/members";
 
 const t = getT("Api");
 
-function rpcErrorToResponse(err: PostgrestError): NextResponse {
-  if (err.code === "42501") {
-    return NextResponse.json({ error: err.message }, { status: 403 });
-  }
-  if (err.code === "22023") {
-    return NextResponse.json({ error: err.message }, { status: 400 });
+// 42501 → 403, 22023 → 400 (RAISE message from migration 018); else 500.
+function rpcErrorToResponse(err: unknown): NextResponse {
+  const known = membershipRpcError(err);
+  if (known) {
+    return NextResponse.json({ error: known.message }, { status: known.status });
   }
   console.error("[transfer-ownership] unexpected RPC error:", err);
   return NextResponse.json(
@@ -58,7 +58,7 @@ function looksLikeUuid(v: unknown): v is string {
 export async function POST(request: Request) {
   try {
     // `requireRole('owner')` is belt-and-braces — the RPC checks
-    // this too, but failing fast here saves a Supabase round trip
+    // this too, but failing fast here saves a database round trip
     // on the obvious "admin trying to transfer" case.
     const ctx = await requireRole("owner");
 
@@ -84,11 +84,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const { error } = await ctx.supabase.rpc("transfer_account_ownership", {
-      p_new_owner_user_id: newOwnerUserId,
-    });
-
-    if (error) return rpcErrorToResponse(error);
+    try {
+      await asUser(ctx.userId, (db) => transferAccountOwnership(db, newOwnerUserId));
+    } catch (error) {
+      return rpcErrorToResponse(error);
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {

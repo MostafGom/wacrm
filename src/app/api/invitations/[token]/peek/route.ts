@@ -11,8 +11,8 @@
 //     `?token=` would.
 //   - The plaintext token never crosses the DB boundary — we
 //     hash it in TS first and look up by `token_hash`.
-//   - The peek RPC is SECURITY DEFINER so it bypasses the RLS
-//     that would otherwise block an anonymous SELECT on
+//   - The peek RPC is SECURITY DEFINER (called as `anon`) so it
+//     bypasses the RLS that would otherwise block an anonymous SELECT on
 //     `account_invitations`. It returns a fixed-shape JSON
 //     payload that never leaks columns beyond what the join
 //     page renders.
@@ -29,7 +29,8 @@ import {
   rateLimitResponse,
   RATE_LIMITS,
 } from "@/lib/rate-limit";
-import { createClient } from "@/lib/supabase/server";
+import { asAnon } from "@/server/db";
+import { peekInvitation } from "@/server/repos/invitations";
 
 /**
  * Best-effort client IP. The `x-forwarded-for` header is what
@@ -68,12 +69,10 @@ export async function GET(
     );
   }
 
-  const supabase = await createClient();
-  const { data, error } = await supabase.rpc("peek_invitation", {
-    p_token_hash: hashInviteToken(token),
-  });
-
-  if (error) {
+  let data: unknown;
+  try {
+    data = await asAnon((db) => peekInvitation(db, hashInviteToken(token)));
+  } catch (error) {
     console.error("[peek] rpc error:", error);
     return NextResponse.json(
       { ok: false, reason: "server_error" },

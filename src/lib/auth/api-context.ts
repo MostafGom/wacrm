@@ -4,14 +4,13 @@
 //
 // This is the machine-to-machine counterpart of `getCurrentAccount`
 // (cookie session → account). Where the dashboard authenticates a
-// human via Supabase cookies, the public API authenticates a caller
+// human via the session cookie, the public API authenticates a caller
 // via `Authorization: Bearer wacrm_live_…`.
 //
 // Calling convention — every `/api/v1` route does:
 //
 //   try {
 //     const ctx = await requireApiKey(request, "messages:send");
-//     // ctx.supabase   — service-role client (no user session exists)
 //     // ctx.accountId  — the key's account; scope every query by it
 //     // ctx.scopes     — granted scopes
 //     // ctx.keyId      — for logging / the rate-limit bucket
@@ -19,8 +18,8 @@
 //     return toApiErrorResponse(err);   // maps ApiError → envelope
 //   }
 //
-// Why a service-role client: an API caller has no Supabase session,
-// so there's no `auth.uid()` for RLS to match. The key lookup itself
+// Data access runs under `asService` (src/server/db): an API caller
+// has no session, so there's no `auth.uid()` for RLS to match. The key lookup itself
 // establishes the account; from there every downstream query MUST be
 // explicitly filtered by `ctx.accountId` (the same discipline the
 // dashboard's send route already follows). The key never escalates
@@ -29,7 +28,7 @@
 
 import type { SupabaseClient } from '@/lib/db';
 
-import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { supabaseAdmin } from '@/lib/db/admin';
 import { findActiveKeyByHash, touchLastUsed } from '@/lib/api-keys/store';
 import { hashApiKey, looksLikeApiKey } from '@/lib/api-keys/keys';
 import { hasScope, type ApiScope } from '@/lib/api-keys/scopes';
@@ -39,7 +38,11 @@ import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
 export interface ApiKeyContext {
   /** Discriminant — lets shared logic tell key auth from cookie auth. */
   authType: 'api_key';
-  /** Service-role Supabase client. RLS-bypassing; scope by accountId. */
+  /**
+   * @deprecated Transitional service-role client (RLS-bypassing), kept
+   * only until every /api/v1 route reads through repositories under
+   * `asService`. Scope by accountId.
+   */
   supabase: SupabaseClient;
   /** The account this key belongs to. */
   accountId: string;
@@ -105,7 +108,7 @@ export async function requireApiKey(
     throw forbidden(`This API key is missing the '${scope}' scope`);
   }
 
-  touchLastUsed(row.id);
+  touchLastUsed(row.id, row.account_id);
 
   return {
     authType: 'api_key',

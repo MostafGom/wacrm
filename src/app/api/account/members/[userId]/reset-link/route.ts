@@ -14,6 +14,8 @@ import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { generateRecoveryLink } from '@/lib/auth/service'
 import { getT } from '@/lib/i18n/translate'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import { asUser } from '@/server/db'
+import { isMemberOfAccount } from '@/server/repos/members'
 
 export const runtime = 'nodejs'
 
@@ -34,13 +36,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ use
     if (!limit.success) return rateLimitResponse(limit)
 
     const { userId } = await params
-    // RLS-scoped read: only members of the caller's account are visible.
-    const { data: member } = await ctx.supabase
-      .from('profiles')
-      .select('user_id')
-      .eq('user_id', userId)
-      .eq('account_id', ctx.accountId)
-      .maybeSingle()
+    // Only members of the caller's account qualify (RLS backs this up).
+    const member = await asUser(ctx.userId, (db) => isMemberOfAccount(db, ctx.accountId, userId)).catch(() => false)
     if (!member) {
       return NextResponse.json({ error: t('account.members.notFound') }, { status: 404 })
     }

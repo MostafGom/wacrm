@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from '@/lib/auth/server-session'
+import { asUser } from '@/server/db'
+import { getProfileByUserId } from '@/server/repos/profiles'
+import { getWhatsAppConfigRow } from '@/server/repos/whatsapp-config'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   getSubscribedApps,
@@ -32,24 +35,17 @@ const t = getT('Api')
  * what the UI badges on.
  */
 export async function GET() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser()
-  if (authError || !user) {
+  const session = await getServerSession()
+  if (!session) {
     return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
   }
+  const userId = session.user.id
 
   // whatsapp_config is one-row-per-account post-017. Resolve the
   // caller's account_id so a teammate who joined an existing account
   // sees the same registration state as the admin who set it up.
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('account_id')
-    .eq('user_id', user.id)
-    .maybeSingle()
-  const accountId = profile?.account_id as string | undefined
+  const profile = await asUser(userId, (db) => getProfileByUserId(db, userId)).catch(() => undefined)
+  const accountId = profile?.account_id ?? undefined
   if (!accountId) {
     return NextResponse.json({
       live: false,
@@ -58,11 +54,7 @@ export async function GET() {
     })
   }
 
-  const { data: config } = await supabase
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .maybeSingle()
+  const config = await asUser(userId, (db) => getWhatsAppConfigRow(db, accountId)).catch(() => undefined)
 
   if (!config) {
     return NextResponse.json({

@@ -5,8 +5,8 @@
 //   POST — mint a new key.
 //
 // These are the *dashboard* endpoints for managing keys, so they
-// authenticate the normal way (cookie session) and go through the
-// RLS client. Listing is open to any member (viewer+) — the roster
+// authenticate the normal way (cookie session) and run as the caller
+// (asUser, RLS enforced). Listing is open to any member (viewer+) — the roster
 // is not secret; the secret (the key itself) is never in it. Minting
 // is admin+ (a key hands out capabilities), enforced by both
 // `requireRole('admin')` here and the `api_keys_insert` RLS policy.
@@ -32,6 +32,8 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limit';
 import { getT } from '@/lib/i18n/translate';
+import { asUser } from '@/server/db';
+import { createApiKey, listApiKeys } from '@/server/repos/api-keys';
 
 const t = getT('Api');
 
@@ -40,24 +42,17 @@ const MAX_NAME_LEN = 80;
 // invite-link clamp. NULL/absent = never expires.
 const MAX_EXPIRY_DAYS = 365;
 
-// Columns safe to expose. `key_hash` is deliberately excluded — it
-// never leaves the server.
-const SAFE_COLUMNS =
-  'id, name, key_prefix, scopes, last_used_at, expires_at, revoked_at, created_at';
-
 export async function GET() {
   try {
     // Any member can view the roster (RLS allows it); we just need a
     // resolved account context.
     const ctx = await getCurrentAccount();
 
-    const { data, error } = await ctx.supabase
-      .from('api_keys')
-      .select(SAFE_COLUMNS)
-      .eq('account_id', ctx.accountId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
+    // Safe columns only — `key_hash` never leaves the server.
+    let keys;
+    try {
+      keys = await asUser(ctx.userId, (db) => listApiKeys(db, ctx.accountId));
+    } catch (error) {
       console.error('[GET /api/account/api-keys] fetch error:', error);
       return NextResponse.json(
         { error: t('account.apiKeys.loadFailed') },
@@ -65,7 +60,7 @@ export async function GET() {
       );
     }
 
-    return NextResponse.json({ keys: data ?? [] });
+    return NextResponse.json({ keys });
   } catch (err) {
     return toErrorResponse(err);
   }
@@ -126,21 +121,20 @@ export async function POST(request: Request) {
 
     const { plaintext, hash, prefix } = generateApiKey();
 
-    const { data, error } = await ctx.supabase
-      .from('api_keys')
-      .insert({
-        account_id: ctx.accountId,
-        created_by: ctx.userId,
-        name: rawName,
-        key_prefix: prefix,
-        key_hash: hash,
-        scopes,
-        expires_at: expiresAt,
-      })
-      .select(SAFE_COLUMNS)
-      .single();
-
-    if (error || !data) {
+    let data;
+    try {
+      data = await asUser(ctx.userId, (db) =>
+        createApiKey(db, {
+          account_id: ctx.accountId,
+          created_by: ctx.userId,
+          name: rawName,
+          key_prefix: prefix,
+          key_hash: hash,
+          scopes,
+          expires_at: expiresAt,
+        })
+      );
+    } catch (error) {
       console.error('[POST /api/account/api-keys] insert error:', error);
       return NextResponse.json(
         { error: t('account.apiKeys.createFailed') },
