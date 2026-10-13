@@ -31,7 +31,7 @@ import {
   RESUME_SCOPES,
   type ResumeScope,
 } from '@/lib/whatsapp/broadcast-resume';
-import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { asService, asUser, serviceRunner, userRunner } from '@/server/db';
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -48,13 +48,13 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  let claimedId: string | null = null;
+  let claimed: { accountId: string; id: string } | null = null;
 
   try {
     // Same gate as the batch send endpoint: running a broadcast is a
     // write, and viewers are read-only. Resuming is no different — it
     // puts real messages on real phones.
-    const { supabase, accountId, userId } = await requireRole('agent');
+    const { accountId, userId } = await requireRole('agent');
 
     const limit = checkRateLimit(
       `broadcast-resume:${userId}`,
@@ -73,8 +73,10 @@ export async function POST(
     // from the same 'pending' rows and message everyone twice — and a
     // WhatsApp message cannot be recalled. The claim is one conditional
     // UPDATE, so exactly one caller wins.
-    const claimed = await claimBroadcastDelivery(supabase, accountId, id);
-    if (!claimed) {
+    const gotLock = await asUser(userId, (db) =>
+      claimBroadcastDelivery(db, accountId, id)
+    );
+    if (!gotLock) {
       return NextResponse.json(
         {
           error:
@@ -83,34 +85,35 @@ export async function POST(
         { status: 409 }
       );
     }
-    claimedId = id;
+    claimed = { accountId, id };
 
     const { plan, remaining, unsendable } = await planBroadcastResume(
-      supabase,
+      userRunner(userId),
       accountId,
       id,
       scope
     );
 
-    await markBroadcastSending(supabase, id);
-    claimedId = null; // ownership passes to the after() block
+    await asUser(userId, (db) => markBroadcastSending(db, accountId, id));
+    claimed = null; // ownership passes to the after() block
 
-    // Service-role client for the fan-out: it outlives the request, and
-    // every id in the plan was already resolved through an
-    // account-scoped read above.
-    const admin = supabaseAdmin();
+    // Service role for the fan-out: it outlives the request, and every
+    // id in the plan was already resolved through an account-scoped
+    // read above. Each recipient write is its own short transaction.
     after(async () => {
       try {
-        await deliverBroadcast(admin, plan);
+        await deliverBroadcast(serviceRunner, plan);
       } catch (err) {
         console.error(
           '[broadcast-resume] delivery threw:',
           err instanceof Error ? err.message : err
         );
         // Don't leave it mid-flight — settle whatever did land.
-        await finalizeBroadcastStatus(admin, id).catch(() => {});
+        await finalizeBroadcastStatus(serviceRunner, accountId, id).catch(() => {});
       } finally {
-        await releaseBroadcastDelivery(admin, id);
+        await asService((db) => releaseBroadcastDelivery(db, accountId, id)).catch(
+          () => {}
+        );
       }
     });
 
@@ -131,8 +134,11 @@ export async function POST(
   } catch (error) {
     // Planning failed after the claim — release it, or the campaign is
     // locked out of resuming until the staleness window expires.
-    if (claimedId) {
-      await releaseBroadcastDelivery(supabaseAdmin(), claimedId).catch(() => {});
+    if (claimed) {
+      const lock = claimed;
+      await asService((db) =>
+        releaseBroadcastDelivery(db, lock.accountId, lock.id)
+      ).catch(() => {});
     }
     if (error instanceof BroadcastError) {
       return NextResponse.json(

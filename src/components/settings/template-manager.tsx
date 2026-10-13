@@ -13,7 +13,7 @@ import {
   RotateCcw,
   Upload,
 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
+import { listTemplates } from '@/lib/broadcasts/broadcasts-api';
 import {
   uploadAccountMedia,
   MEDIA_MAX_BYTES_BY_KIND,
@@ -134,7 +134,6 @@ export function TemplateManager() {
   // Meta's category ids (stored as-is) → display label in the UI language.
   const categoryLabel = (category: string) =>
     t.has(`categoryLabels.${category}`) ? t(`categoryLabels.${category}`) : category;
-  const supabase = createClient();
   const { user, loading: authLoading } = useAuth();
 
   const [loading, setLoading] = useState(true);
@@ -192,20 +191,18 @@ export function TemplateManager() {
       setLoading(false);
       return;
     }
-    fetchTemplates(user.id);
+    fetchTemplates();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user?.id]);
 
-  async function fetchTemplates(userId: string) {
+  // The caller's own templates (`mine` — the route scopes to the
+  // signed-in user).
+  async function fetchTemplates() {
     try {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('message_templates')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      setTemplates(data || []);
+      const { data, error } = await listTemplates({ mine: true });
+      if (error) throw new Error(error.message);
+      setTemplates(data.templates || []);
     } catch (err) {
       console.error('Failed to fetch templates:', err);
       toast.error(t('toastLoadFailed'));
@@ -289,7 +286,7 @@ export function TemplateManager() {
       }
       // Refresh first, then close — re-opening the dialog
       // immediately should not show a stale list.
-      if (user) await fetchTemplates(user.id);
+      if (user) await fetchTemplates();
       toast.success(
         data.dry_run
           ? isEdit
@@ -343,7 +340,7 @@ export function TemplateManager() {
           { duration: 10000 },
         );
       }
-      await fetchTemplates(user.id);
+      await fetchTemplates();
     } catch (err) {
       console.error('Template sync error:', err);
       toast.error(err instanceof Error ? err.message : t('toastSyncError'));

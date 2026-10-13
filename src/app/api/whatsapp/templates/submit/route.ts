@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import type { SupabaseClient } from '@/lib/db'
 import {
   ForbiddenError,
   UnauthorizedError,
@@ -16,6 +15,11 @@ import { buildMetaTemplatePayload } from '@/lib/whatsapp/template-components'
 import { ensureMediaHeaderHandle } from '@/lib/whatsapp/template-header-handle'
 import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import {
+  getWhatsappConfig,
+  upsertTemplateByUserNameLanguage,
+} from '@/server/repos/templates'
 
 const t = getT('Api')
 
@@ -64,20 +68,16 @@ function buildUpsertRow(
   }
 }
 
-async function upsertTemplateRow(
-  supabase: SupabaseClient,
+function upsertTemplateRow(
+  userId: string,
   row: ReturnType<typeof buildUpsertRow>,
 ) {
   // TODO(account-sharing): conflict target is still scoped to
   // user_id. Once a follow-up migration drops the legacy unique
   // index on (user_id, name, language) and adds (account_id,
-  // name, language), switch `onConflict` here so two teammates
-  // can't shadow each other's same-named template.
-  return supabase
-    .from('message_templates')
-    .upsert(row, { onConflict: 'user_id,name,language' })
-    .select()
-    .single()
+  // name, language), switch the conflict target here so two
+  // teammates can't shadow each other's same-named template.
+  return asUser(userId, (db) => upsertTemplateByUserNameLanguage(db, row))
 }
 
 /**
@@ -102,7 +102,7 @@ export async function POST(request: Request) {
     // membership, so a viewer or agent could push a template to Meta for
     // approval — an external side effect RLS can't roll back — before the
     // local upsert was refused.
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
 
     let payload: TemplatePayload
     try {
@@ -141,12 +141,8 @@ export async function POST(request: Request) {
       metaTemplateId = `dry-run-${crypto.randomUUID()}`
       metaStatus = 'PENDING'
     } else {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config) {
+      const config = await asUser(userId, (db) => getWhatsappConfig(db, accountId))
+      if (!config) {
         return NextResponse.json(
           {
             error:
@@ -195,13 +191,13 @@ export async function POST(request: Request) {
         // Persist the failure so the user can retry; row stays DRAFT
         // until they fix and re-submit.
         await upsertTemplateRow(
-          supabase,
+          userId,
           buildUpsertRow(accountId, userId, payload, {
             status: 'DRAFT',
             metaTemplateId: null,
             submissionError: message,
           }),
-        )
+        ).catch((err) => console.error('Failed to record template submit error:', err))
         const isRateLimit = /\b429\b/.test(message)
         return NextResponse.json(
           {
@@ -214,22 +210,25 @@ export async function POST(request: Request) {
       }
     }
 
-    const { data: row, error: upsertErr } = await upsertTemplateRow(
-      supabase,
-      buildUpsertRow(accountId, userId, payload, {
-        status: normalizeStatus(metaStatus),
-        metaTemplateId,
-        submissionError: null,
-      }),
-    )
-
-    if (upsertErr) {
+    let row
+    try {
+      row = await upsertTemplateRow(
+        userId,
+        buildUpsertRow(accountId, userId, payload, {
+          status: normalizeStatus(metaStatus),
+          metaTemplateId,
+          submissionError: null,
+        }),
+      )
+    } catch (upsertErr) {
       // The submit succeeded on Meta's side but we failed to persist
       // locally. That's a data-drift state — surface the meta_template_id
       // so the user can recover via "Sync from Meta".
       return NextResponse.json(
         {
-          error: t('templates.submittedSaveFailed', { message: upsertErr.message }),
+          error: t('templates.submittedSaveFailed', {
+            message: upsertErr instanceof Error ? upsertErr.message : String(upsertErr),
+          }),
           meta_template_id: metaTemplateId,
         },
         { status: 500 },

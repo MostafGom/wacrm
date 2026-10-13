@@ -37,7 +37,7 @@ import { requireApiKey } from '@/lib/auth/api-context';
 export const maxDuration = 60;
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { resolveAuditUserId, ContactError } from '@/lib/api/v1/contacts';
-import { asService } from '@/server/db';
+import { asService, serviceRunner } from '@/server/db';
 import {
   createBroadcast,
   deliverBroadcast,
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
 
     const auditUserId = await asService((db) => resolveAuditUserId(db, ctx.accountId));
 
-    const plan = await createBroadcast(ctx.supabase, ctx.accountId, auditUserId, {
+    const plan = await createBroadcast(serviceRunner, ctx.accountId, auditUserId, {
       name: typeof body.name === 'string' ? body.name : null,
       templateName,
       templateLanguage:
@@ -75,10 +75,10 @@ export async function POST(request: Request) {
       })),
     });
 
-    // Fan out after the response is sent. Uses the same service-role
-    // client — no request-scoped auth needed for the Meta calls or
-    // the account-scoped row updates.
-    after(() => deliverBroadcast(ctx.supabase, plan));
+    // Fan out after the response is sent, as the service role — no
+    // request-scoped auth needed for the Meta calls or the
+    // account-scoped row updates (one short transaction per write).
+    after(() => deliverBroadcast(serviceRunner, plan));
 
     return ok(
       {

@@ -29,64 +29,33 @@ const TEMPLATE = {
 const templateUpdates: Record<string, unknown>[] = []
 let templateDeletes = 0
 
-function makeSupabaseMock() {
-  function builder(table: string) {
-    const result = () => {
-      switch (table) {
-        case 'profiles':
-          return {
-            data: { account_id: 'acct-1', account_role: callerRole },
-            error: null,
-          }
-        case 'accounts':
-          return { data: { id: 'acct-1', name: 'Acme' }, error: null }
-        case 'message_templates':
-          return { data: TEMPLATE, error: null }
-        case 'whatsapp_config':
-          return {
-            data: {
-              id: 'cfg-1',
-              account_id: 'acct-1',
-              phone_number_id: 'PNID-1',
-              waba_id: 'WABA-1',
-              access_token: 'enc-token',
-            },
-            error: null,
-          }
-        default:
-          return { data: null, error: null }
-      }
-    }
+// The templates repository — the route's only path to the database.
+const repo = vi.hoisted(() => ({
+  getTemplateMeta: vi.fn(),
+  getWhatsappConfig: vi.fn(),
+  updateTemplate: vi.fn(),
+  deleteTemplate: vi.fn(),
+}))
+vi.mock('@/server/repos/templates', () => repo)
 
-    const b: Record<string, unknown> = {}
-    const chain = () => b
-    for (const m of ['select', 'eq', 'in', 'order', 'limit']) b[m] = vi.fn(chain)
-    b.update = vi.fn((patch: Record<string, unknown>) => {
-      if (table === 'message_templates') templateUpdates.push(patch)
-      return b
-    })
-    b.delete = vi.fn(() => {
-      if (table === 'message_templates') templateDeletes += 1
-      return b
-    })
-    b.single = vi.fn(async () => result())
-    b.maybeSingle = vi.fn(async () => result())
-    b.then = (resolve: (v: unknown) => unknown) => resolve(result())
-    return b
-  }
-
-  return {
-    auth: {
-      getUser: vi.fn(async () => ({
-        data: { user: { id: 'user-1' } },
-        error: null,
-      })),
+function resetRepo() {
+  repo.getTemplateMeta.mockReset().mockResolvedValue(TEMPLATE)
+  repo.getWhatsappConfig.mockReset().mockResolvedValue({
+    phone_number_id: 'PNID-1',
+    waba_id: 'WABA-1',
+    access_token: 'enc-token',
+  })
+  repo.updateTemplate.mockReset().mockImplementation(
+    async (_db: unknown, _acct: string, _id: string, patch: Record<string, unknown>) => {
+      templateUpdates.push(patch)
+      return { ...TEMPLATE, ...patch }
     },
-    from: vi.fn((table: string) => builder(table)),
-  }
+  )
+  repo.deleteTemplate.mockReset().mockImplementation(async () => {
+    templateDeletes += 1
+    return true
+  })
 }
-
-let supabaseMock = makeSupabaseMock()
 
 // requireRole runs for real: session + profile come from these mocks,
 // with the role read from `callerRole` at call time.
@@ -103,10 +72,9 @@ vi.mock('@/server/repos/profiles', async () =>
   }),
 )
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
-
-vi.mock('@/lib/supabase/server', () => ({
-  createClient: vi.fn(async () => supabaseMock),
-}))
+// No request scope in a unit test: the transitional request-scoped client
+// that getCurrentAccount still builds reads cookies — hand it none.
+vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }))
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: vi.fn(() => 'plaintext-token'),
@@ -148,7 +116,7 @@ beforeEach(() => {
   templateUpdates.length = 0
   templateDeletes = 0
   callerRole = 'admin'
-  supabaseMock = makeSupabaseMock()
+  resetRepo()
   meta.editMessageTemplate.mockClear()
   meta.deleteMessageTemplate.mockClear()
 })
@@ -160,6 +128,7 @@ describe('template lifecycle role gate (GHSA-m4fx-g6pr-hrw8)', () => {
       const res = await patchTemplate()
       expect(res.status).toBe(403)
       expect(meta.editMessageTemplate).not.toHaveBeenCalled()
+      expect(repo.getTemplateMeta).not.toHaveBeenCalled()
       expect(templateUpdates).toHaveLength(0)
     })
 
@@ -176,9 +145,13 @@ describe('template lifecycle role gate (GHSA-m4fx-g6pr-hrw8)', () => {
     const patched = await patchTemplate()
     expect(patched.status).toBe(200)
     expect(meta.editMessageTemplate).toHaveBeenCalledTimes(1)
+    // Scoped to the caller's account, and the local row flips to PENDING.
+    expect(repo.getTemplateMeta).toHaveBeenCalledWith(expect.anything(), 'acct-1', TEMPLATE.id)
+    expect(templateUpdates.at(-1)).toMatchObject({ status: 'PENDING', body_text: 'Rewritten by an unprivileged member' })
 
     const deleted = await DELETE(new Request('http://localhost/t'), { params })
     expect(deleted.status).toBe(200)
     expect(meta.deleteMessageTemplate).toHaveBeenCalledTimes(1)
+    expect(templateDeletes).toBe(1)
   })
 })

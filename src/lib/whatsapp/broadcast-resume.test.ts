@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { SupabaseClient } from '@/lib/db';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { Db, Runner } from '@/server/db';
 import { BroadcastError } from './broadcast-core';
 import {
   claimBroadcastDelivery,
+  DELIVERY_LOCK_STALE_MS,
   planBroadcastResume,
   releaseBroadcastDelivery,
   RESUME_MAX_PER_REQUEST,
@@ -13,98 +14,91 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: (v: string) => `decrypted:${v}`,
 }));
 
+const repo = vi.hoisted(() => ({
+  claimDeliveryLock: vi.fn(),
+  releaseDeliveryLock: vi.fn(),
+  getBroadcast: vi.fn(),
+  loadRecipientsForResume: vi.fn(),
+  failRecipients: vi.fn(),
+  setBroadcastTerminalStatus: vi.fn(),
+  // broadcast-core imports these; unused by the resume planner.
+  createBroadcastWithRecipients: vi.fn(),
+  recipientStatusCounts: vi.fn(),
+  stampRecipient: vi.fn(),
+}));
+vi.mock('@/server/repos/broadcasts', () => repo);
+
+const templatesRepo = vi.hoisted(() => ({
+  getWhatsappConfig: vi.fn(),
+  listTemplatesByName: vi.fn(),
+}));
+vi.mock('@/server/repos/templates', () => templatesRepo);
+
+vi.mock('@/lib/api/v1/contacts', () => ({ findOrCreateContact: vi.fn() }));
+
+const fakeDb = { name: 'tx' } as unknown as Db;
+/** A Runner that hands every callback the same fake transaction. */
+const run: Runner = (fn) => fn(fakeDb);
+
+beforeEach(() => {
+  for (const fn of [...Object.values(repo), ...Object.values(templatesRepo)]) fn.mockReset();
+});
+
 // ============================================================
 // Claim / release — the mutex that stops a double-send.
 // ============================================================
 
-interface ClaimCall {
-  update: Record<string, unknown>;
-  filters: Record<string, unknown>;
-  or?: string;
-}
-
-function claimDb(returnedRows: unknown[], calls: ClaimCall[]): SupabaseClient {
-  return {
-    from() {
-      const call: ClaimCall = { update: {}, filters: {} };
-      const b: Record<string, unknown> = {
-        update: (row: Record<string, unknown>) => {
-          call.update = row;
-          calls.push(call);
-          return b;
-        },
-        eq: (col: string, val: unknown) => {
-          call.filters[col] = val;
-          return b;
-        },
-        or: (expr: string) => {
-          call.or = expr;
-          return b;
-        },
-        select: async () => ({ data: returnedRows, error: null }),
-        then: (resolve: (r: { error: null }) => unknown) =>
-          resolve({ error: null }),
-      };
-      return b;
-    },
-  } as unknown as SupabaseClient;
-}
-
 describe('claimBroadcastDelivery', () => {
   it('claims when the conditional UPDATE matched a row', async () => {
-    const calls: ClaimCall[] = [];
-    const ok = await claimBroadcastDelivery(
-      claimDb([{ id: 'bc-1' }], calls),
-      'acct-1',
-      'bc-1',
-      new Date('2026-08-11T12:00:00Z'),
-    );
+    repo.claimDeliveryLock.mockResolvedValue(true);
+    const now = new Date('2026-08-11T12:00:00Z');
+    const ok = await claimBroadcastDelivery(fakeDb, 'acct-1', 'bc-1', now);
 
     expect(ok).toBe(true);
-    expect(calls[0].filters).toEqual({ id: 'bc-1', account_id: 'acct-1' });
-    expect(calls[0].update.delivery_locked_at).toBe(
-      '2026-08-11T12:00:00.000Z',
+    expect(repo.claimDeliveryLock).toHaveBeenCalledWith(
+      fakeDb,
+      'acct-1',
+      'bc-1',
+      now,
+      expect.any(Date),
     );
   });
 
   it('refuses when another pass already holds the lock', async () => {
     // The UPDATE's WHERE didn't match — someone else got there first.
-    const ok = await claimBroadcastDelivery(
-      claimDb([], []),
-      'acct-1',
-      'bc-1',
-    );
-    expect(ok).toBe(false);
+    repo.claimDeliveryLock.mockResolvedValue(false);
+    expect(await claimBroadcastDelivery(fakeDb, 'acct-1', 'bc-1')).toBe(false);
   });
 
   it('treats a lock older than the staleness window as abandoned', async () => {
-    const calls: ClaimCall[] = [];
-    await claimBroadcastDelivery(
-      claimDb([{ id: 'bc-1' }], calls),
-      'acct-1',
-      'bc-1',
-      new Date('2026-08-11T12:00:00Z'),
-    );
+    repo.claimDeliveryLock.mockResolvedValue(true);
+    await claimBroadcastDelivery(fakeDb, 'acct-1', 'bc-1', new Date('2026-08-11T12:00:00Z'));
     // 30 minutes before "now" — a pass whose process died is recoverable
     // without touching the database by hand.
-    expect(calls[0].or).toBe(
-      'delivery_locked_at.is.null,delivery_locked_at.lt.2026-08-11T11:30:00.000Z',
-    );
+    const cutoff = repo.claimDeliveryLock.mock.calls[0][4] as Date;
+    expect(cutoff.toISOString()).toBe('2026-08-11T11:30:00.000Z');
+    expect(DELIVERY_LOCK_STALE_MS).toBe(30 * 60 * 1000);
   });
 
   it('is scoped to the account, so another tenant cannot claim it', async () => {
-    const calls: ClaimCall[] = [];
-    await claimBroadcastDelivery(claimDb([], calls), 'acct-9', 'bc-1');
-    expect(calls[0].filters.account_id).toBe('acct-9');
+    repo.claimDeliveryLock.mockResolvedValue(false);
+    await claimBroadcastDelivery(fakeDb, 'acct-9', 'bc-1');
+    expect(repo.claimDeliveryLock.mock.calls[0][1]).toBe('acct-9');
   });
 });
 
 describe('releaseBroadcastDelivery', () => {
   it('clears the lock', async () => {
-    const calls: ClaimCall[] = [];
-    await releaseBroadcastDelivery(claimDb([], calls), 'bc-1');
-    expect(calls[0].update).toEqual({ delivery_locked_at: null });
-    expect(calls[0].filters).toEqual({ id: 'bc-1' });
+    repo.releaseDeliveryLock.mockResolvedValue(undefined);
+    await releaseBroadcastDelivery(fakeDb, 'acct-1', 'bc-1');
+    expect(repo.releaseDeliveryLock).toHaveBeenCalledWith(fakeDb, 'acct-1', 'bc-1');
+  });
+
+  it('is best-effort — a failed release does not throw', async () => {
+    repo.releaseDeliveryLock.mockRejectedValue(new Error('db down'));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(releaseBroadcastDelivery(fakeDb, 'acct-1', 'bc-1')).resolves.toBeUndefined();
+    spy.mockRestore();
   });
 });
 
@@ -114,66 +108,23 @@ describe('releaseBroadcastDelivery', () => {
 
 interface PlanFixture {
   broadcast?: Record<string, unknown> | null;
-  recipients?: Record<string, unknown>[];
-  recipientCount?: number;
+  recipients?: { id: string; template_params: unknown; phone: string | null }[];
+  inScope?: number;
   config?: Record<string, unknown> | null;
   templates?: Record<string, unknown>[];
 }
 
-interface PlanWrites {
-  statusFilter?: unknown;
-  failedIds?: unknown;
-  failedIdBatches?: unknown[];
-  failedUpdate?: Record<string, unknown>;
-}
-
-function planDb(fx: PlanFixture, writes: PlanWrites = {}): SupabaseClient {
-  return {
-    from(table: string) {
-      const b: Record<string, unknown> = {
-        select: () => b,
-        eq: () => b,
-        order: () => b,
-        range: () => b,
-        in: (col: string, vals: unknown) => {
-          if (col === 'status') writes.statusFilter = vals;
-          if (col === 'id') {
-            writes.failedIds = vals;
-            writes.failedIdBatches = [...(writes.failedIdBatches ?? []), vals];
-          }
-          return b;
-        },
-        update: (row: Record<string, unknown>) => {
-          writes.failedUpdate = row;
-          return b;
-        },
-        maybeSingle: async () => ({
-          data: fx.broadcast === undefined ? null : fx.broadcast,
-          error: null,
-        }),
-        single: async () => ({
-          data: fx.config === undefined ? null : fx.config,
-          error: null,
-        }),
-        then: (
-          resolve: (r: { data: unknown[]; count?: number; error: null }) => unknown,
-        ) => {
-          if (table === 'broadcast_recipients') {
-            return resolve({
-              data: fx.recipients ?? [],
-              count: fx.recipientCount,
-              error: null,
-            });
-          }
-          if (table === 'message_templates') {
-            return resolve({ data: fx.templates ?? [], error: null });
-          }
-          return resolve({ data: [], error: null });
-        },
-      };
-      return b;
+function setup(fx: PlanFixture) {
+  repo.getBroadcast.mockResolvedValue(fx.broadcast ?? undefined);
+  repo.loadRecipientsForResume.mockImplementation(
+    async (_db: unknown, _acct: string, _id: string, _statuses: string[], limit: number) => {
+      const all = fx.recipients ?? [];
+      return { rows: all.slice(0, limit), inScope: fx.inScope ?? all.length };
     },
-  } as unknown as SupabaseClient;
+  );
+  repo.failRecipients.mockResolvedValue(undefined);
+  templatesRepo.getWhatsappConfig.mockResolvedValue(fx.config ?? undefined);
+  templatesRepo.listTemplatesByName.mockResolvedValue(fx.templates ?? []);
 }
 
 const BROADCAST = {
@@ -182,236 +133,160 @@ const BROADCAST = {
   template_language: 'en_US',
 };
 
-const CONFIG = { phone_number_id: 'pn-1', access_token: 'tok' };
+const CONFIG = { phone_number_id: 'pn-1', access_token: 'tok', waba_id: null };
 
-function recipient(
-  id: string,
-  phone: string | null,
-  params: unknown = ['A123'],
-) {
-  return {
-    id,
-    template_params: params,
-    contact: phone ? { phone } : null,
-  };
+function recipient(id: string, phone: string | null, params: unknown = ['A123']) {
+  return { id, template_params: params, phone };
+}
+
+function statusFilter(): unknown {
+  return repo.loadRecipientsForResume.mock.calls[0][3];
 }
 
 describe('planBroadcastResume', () => {
   it('plans the outstanding recipients with their frozen params', async () => {
-    const writes: PlanWrites = {};
-    const { plan, remaining, unsendable } = await planBroadcastResume(
-      planDb(
-        {
-          broadcast: BROADCAST,
-          config: CONFIG,
-          recipients: [
-            recipient('r1', '+15551234567', ['A123', 'Friday']),
-            recipient('r2', '+15559876543', ['B456', 'Monday']),
-          ],
-        },
-        writes,
-      ),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({
+      broadcast: BROADCAST,
+      config: CONFIG,
+      recipients: [
+        recipient('r1', '+15551234567', ['A123', 'Friday']),
+        recipient('r2', '+15559876543', ['B456', 'Monday']),
+      ],
+    });
+    const { plan, remaining, unsendable } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
 
-    expect(writes.statusFilter).toEqual(['pending']);
+    expect(statusFilter()).toEqual(['pending']);
     // Phones are stored sanitized (no leading '+'), same as the shape
     // createBroadcast plans — deliverBroadcast feeds them to
     // phoneVariants from here.
     expect(plan.planned).toEqual([
-      {
-        recipientRowId: 'r1',
-        phone: '15551234567',
-        params: ['A123', 'Friday'],
-      },
-      {
-        recipientRowId: 'r2',
-        phone: '15559876543',
-        params: ['B456', 'Monday'],
-      },
+      { recipientRowId: 'r1', phone: '15551234567', params: ['A123', 'Friday'] },
+      { recipientRowId: 'r2', phone: '15559876543', params: ['B456', 'Monday'] },
     ]);
+    expect(plan.accountId).toBe('acct-1');
     expect(plan.accessToken).toBe('decrypted:tok');
     expect(remaining).toBe(0);
     expect(unsendable).toBe(0);
+    expect(repo.failRecipients).not.toHaveBeenCalled();
   });
 
   it('scopes to failed rows when retrying, and to both for "all"', async () => {
-    const failedWrites: PlanWrites = {};
-    await planBroadcastResume(
-      planDb(
-        {
-          broadcast: BROADCAST,
-          config: CONFIG,
-          recipients: [recipient('r1', '+15551234567')],
-        },
-        failedWrites,
-      ),
-      'acct-1',
-      'bc-1',
-      'failed',
-    );
-    expect(failedWrites.statusFilter).toEqual(['failed']);
+    setup({ broadcast: BROADCAST, config: CONFIG, recipients: [recipient('r1', '+15551234567')] });
+    await planBroadcastResume(run, 'acct-1', 'bc-1', 'failed');
+    expect(statusFilter()).toEqual(['failed']);
 
-    const allWrites: PlanWrites = {};
-    await planBroadcastResume(
-      planDb(
-        {
-          broadcast: BROADCAST,
-          config: CONFIG,
-          recipients: [recipient('r1', '+15551234567')],
-        },
-        allWrites,
-      ),
-      'acct-1',
-      'bc-1',
-      'all',
-    );
-    expect(allWrites.statusFilter).toEqual(['pending', 'failed']);
+    repo.loadRecipientsForResume.mockClear();
+    await planBroadcastResume(run, 'acct-1', 'bc-1', 'all');
+    expect(statusFilter()).toEqual(['pending', 'failed']);
   });
 
   it('treats a missing or malformed params column as no params', async () => {
-    const { plan } = await planBroadcastResume(
-      planDb({
-        broadcast: BROADCAST,
-        config: CONFIG,
-        recipients: [
-          // Rows created before migration 038 carry NULL.
-          recipient('r1', '+15551234567', null),
-          recipient('r2', '+15559876543', 'not-an-array'),
-        ],
-      }),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({
+      broadcast: BROADCAST,
+      config: CONFIG,
+      recipients: [
+        // Rows created before migration 038 carry NULL.
+        recipient('r1', '+15551234567', null),
+        recipient('r2', '+15559876543', 'not-an-array'),
+      ],
+    });
+    const { plan } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
     expect(plan.planned.map((p) => p.params)).toEqual([[], []]);
   });
 
   it('fails unsendable rows up front so they stop blocking the status', async () => {
-    const writes: PlanWrites = {};
-    const { plan, unsendable } = await planBroadcastResume(
-      planDb(
-        {
-          broadcast: BROADCAST,
-          config: CONFIG,
-          recipients: [
-            recipient('r1', '+15551234567'),
-            recipient('r2', null),
-            recipient('r3', 'nonsense'),
-          ],
-        },
-        writes,
-      ),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({
+      broadcast: BROADCAST,
+      config: CONFIG,
+      recipients: [recipient('r1', '+15551234567'), recipient('r2', null), recipient('r3', 'nonsense')],
+    });
+    const { plan, unsendable } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
 
     // Left 'pending', these would keep the broadcast in 'sending'
     // forever — the exact symptom being fixed.
     expect(unsendable).toBe(2);
-    expect(writes.failedIds).toEqual(['r2', 'r3']);
-    expect(writes.failedUpdate?.status).toBe('failed');
+    expect(repo.failRecipients).toHaveBeenCalledWith(
+      fakeDb,
+      'acct-1',
+      'bc-1',
+      ['r2', 'r3'],
+      'No valid phone number on contact',
+    );
     expect(plan.planned).toHaveLength(1);
+  });
+
+  it('keeps the unsendable stamps even when nothing is left to send', async () => {
+    setup({ broadcast: BROADCAST, config: CONFIG, recipients: [recipient('r1', null)] });
+    await expect(planBroadcastResume(run, 'acct-1', 'bc-1', 'pending')).rejects.toMatchObject({
+      code: 'nothing_to_resume',
+    });
+    // Written through its own runner call, so the throw that follows
+    // doesn't roll it back.
+    expect(repo.failRecipients).toHaveBeenCalledTimes(1);
   });
 
   it('caps one pass and reports the leftover', async () => {
     const many = Array.from({ length: RESUME_MAX_PER_REQUEST + 25 }, (_, i) =>
       recipient(`r${i}`, '+1555000' + String(i).padStart(4, '0')),
     );
-    const { plan, remaining } = await planBroadcastResume(
-      planDb({ broadcast: BROADCAST, config: CONFIG, recipients: many }),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({ broadcast: BROADCAST, config: CONFIG, recipients: many });
+    const { plan, remaining } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
     expect(plan.planned).toHaveLength(RESUME_MAX_PER_REQUEST);
     // Surfaced to the caller rather than silently dropped.
     expect(remaining).toBe(25);
   });
 
-  it('counts the backlog the 1000-row page did not load', async () => {
+  it('counts the backlog the capped load did not return', async () => {
     const firstPage = Array.from({ length: RESUME_MAX_PER_REQUEST }, (_, i) =>
       recipient(`r${i}`, '+1555000' + String(i).padStart(4, '0')),
     );
-    const { plan, remaining } = await planBroadcastResume(
-      planDb({
-        broadcast: BROADCAST,
-        config: CONFIG,
-        recipients: firstPage,
-        recipientCount: 2812,
-      }),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({ broadcast: BROADCAST, config: CONFIG, recipients: firstPage, inScope: 2812 });
+    const { plan, remaining } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
     expect(plan.planned).toHaveLength(RESUME_MAX_PER_REQUEST);
     expect(remaining).toBe(2812 - RESUME_MAX_PER_REQUEST);
   });
 
-  it('stamps many unsendable rows in URL-sized batches', async () => {
-    const writes: PlanWrites = {};
-    const rows = [
-      recipient('ok', '+15551234567'),
-      ...Array.from({ length: 250 }, (_, i) => recipient(`bad${i}`, null)),
-    ];
-    const { unsendable } = await planBroadcastResume(
-      planDb({ broadcast: BROADCAST, config: CONFIG, recipients: rows }, writes),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
-    expect(unsendable).toBe(250);
-    const batches = (writes.failedIdBatches ?? []) as string[][];
-    expect(batches.map((b) => b.length)).toEqual([100, 100, 50]);
-    expect(batches.flat()).toHaveLength(250);
-  });
-
   it('404s a broadcast that is not on this account', async () => {
-    await expect(
-      planBroadcastResume(
-        planDb({ broadcast: null }),
-        'acct-1',
-        'bc-1',
-        'pending',
-      ),
-    ).rejects.toMatchObject({ status: 404 });
+    setup({ broadcast: null });
+    await expect(planBroadcastResume(run, 'acct-1', 'bc-1', 'pending')).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(repo.loadRecipientsForResume).not.toHaveBeenCalled();
   });
 
   it('refuses when there is nothing outstanding', async () => {
-    await expect(
-      planBroadcastResume(
-        planDb({ broadcast: BROADCAST, config: CONFIG, recipients: [] }),
-        'acct-1',
-        'bc-1',
-        'failed',
-      ),
-    ).rejects.toBeInstanceOf(BroadcastError);
+    setup({ broadcast: BROADCAST, config: CONFIG, recipients: [] });
+    await expect(planBroadcastResume(run, 'acct-1', 'bc-1', 'failed')).rejects.toBeInstanceOf(
+      BroadcastError,
+    );
+  });
+
+  it('400s when WhatsApp is not configured', async () => {
+    setup({ broadcast: BROADCAST, config: null, recipients: [recipient('r1', '+15551234567')] });
+    await expect(planBroadcastResume(run, 'acct-1', 'bc-1', 'pending')).rejects.toMatchObject({
+      code: 'whatsapp_not_configured',
+      status: 400,
+    });
   });
 
   it('resolves the template row for header + button components', async () => {
-    const { plan } = await planBroadcastResume(
-      planDb({
-        broadcast: { ...BROADCAST, template_language: 'en_US' },
-        config: CONFIG,
-        recipients: [recipient('r1', '+15551234567')],
-        templates: [
-          {
-            id: 'tpl-1',
-            user_id: 'u-1',
-            name: 'order_update',
-            // Synced from Meta as bare 'en' — the resolver bridges it.
-            language: 'en',
-            body_text: 'Your order {{1}} ships on {{2}}',
-          },
-        ],
-      }),
-      'acct-1',
-      'bc-1',
-      'pending',
-    );
+    setup({
+      broadcast: { ...BROADCAST, template_language: 'en_US' },
+      config: CONFIG,
+      recipients: [recipient('r1', '+15551234567')],
+      templates: [
+        {
+          id: 'tpl-1',
+          user_id: 'u-1',
+          name: 'order_update',
+          // Synced from Meta as bare 'en' — the resolver bridges it.
+          language: 'en',
+          body_text: 'Your order {{1}} ships on {{2}}',
+        },
+      ],
+    });
+    const { plan } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'pending');
+    expect(templatesRepo.listTemplatesByName).toHaveBeenCalledWith(fakeDb, 'acct-1', 'order_update');
     expect(plan.templateRow?.language).toBe('en');
   });
 });

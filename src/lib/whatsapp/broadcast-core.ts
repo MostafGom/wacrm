@@ -16,8 +16,6 @@
 // for API broadcasts exactly as it does for dashboard ones.
 // ============================================================
 
-import type { SupabaseClient } from '@/lib/db';
-
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import {
@@ -25,10 +23,17 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
-import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
+import { pickTemplateRow } from '@/lib/whatsapp/template-body';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
-import { asService } from '@/server/db';
+import type { Runner } from '@/server/db';
+import {
+  createBroadcastWithRecipients,
+  recipientStatusCounts,
+  setBroadcastTerminalStatus,
+  stampRecipient,
+} from '@/server/repos/broadcasts';
+import { getWhatsappConfig, listTemplatesByName } from '@/server/repos/templates';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -63,6 +68,8 @@ interface PlannedRecipient {
 }
 
 export interface BroadcastPlan {
+  /** Owning account — every recipient write is scoped to it. */
+  accountId: string;
   broadcastId: string;
   templateName: string;
   templateLanguage: string;
@@ -81,9 +88,12 @@ const MAX_RECIPIENTS = 1000;
  * contact. Returns a plan for {@link deliverBroadcast}. Throws
  * {@link BroadcastError} on bad input / missing config / a malformed
  * template / a DB failure — nothing is sent in this phase.
+ *
+ * `run` must be a service-role runner: the atomic create RPC is
+ * granted to service_role only.
  */
 export async function createBroadcast(
-  db: SupabaseClient,
+  run: Runner,
   accountId: string,
   auditUserId: string,
   params: CreateBroadcastParams
@@ -110,12 +120,11 @@ export async function createBroadcast(
 
   // Config (fail fast + provides the audit trail owner already resolved
   // by the caller). Meta send needs phone_number_id + decrypted token.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
-  if (configError || !config) {
+  const { config, templateRows } = await run(async (db) => ({
+    config: await getWhatsappConfig(db, accountId),
+    templateRows: await listTemplatesByName(db, accountId, templateName),
+  }));
+  if (!config) {
     throw new BroadcastError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
@@ -126,12 +135,7 @@ export async function createBroadcast(
 
   // Template row (once) for header/button components; guard a
   // malformed local row rather than N identical opaque failures.
-  const resolvedTemplate = await resolveTemplateRow(
-    db,
-    accountId,
-    templateName,
-    params.templateLanguage
-  );
+  const resolvedTemplate = pickTemplateRow(templateRows, params.templateLanguage);
   if (resolvedTemplate.malformed) {
     throw new BroadcastError(
       'template_malformed',
@@ -155,7 +159,7 @@ export async function createBroadcast(
       rejected++;
       continue;
     }
-    const { id } = await asService((tx) =>
+    const { id } = await run((tx) =>
       findOrCreateContact(tx, accountId, auditUserId, {
         phone: to,
       }),
@@ -204,39 +208,43 @@ export async function createBroadcast(
   // an orphaned campaign that looked like it was sending but had no
   // delivery plan (issue #370). The function body is atomic, so a recipient
   // failure now rolls the parent back and nothing orphaned survives.
-  const { data: createdRows, error: createErr } = await db.rpc(
-    'create_broadcast_with_recipients',
-    {
-      p_account_id: accountId,
-      p_user_id: auditUserId,
-      p_name: name || `API broadcast (${templateName})`,
-      p_template_name: templateName,
-      p_template_language: resolvedTemplate.language,
-      p_total_recipients: deduped.length,
-      p_contact_ids: deduped.map((r) => r.contactId),
-      // Frozen per-recipient params (migration 038) — without them a
-      // resume of this broadcast has no way to reconstruct {{1}}.
-      p_template_params: deduped.map((r) => r.params),
-    }
-  );
-  if (createErr || !createdRows || createdRows.length === 0) {
+  let createdRows: { broadcast_id: string; recipient_id: string; contact_id: string }[];
+  try {
+    createdRows = await run((db) =>
+      createBroadcastWithRecipients(db, {
+        accountId,
+        userId: auditUserId,
+        name: name || `API broadcast (${templateName})`,
+        templateName,
+        templateLanguage: resolvedTemplate.language,
+        contactIds: deduped.map((r) => r.contactId),
+        // Frozen per-recipient params (migration 038) — without them a
+        // resume of this broadcast has no way to reconstruct {{1}}.
+        templateParams: deduped.map((r) => r.params),
+      }),
+    );
+  } catch (createErr) {
     console.error('[broadcast-core] create broadcast error:', createErr);
     throw new BroadcastError('internal', 'Failed to create broadcast', 500);
   }
+  if (createdRows.length === 0) {
+    throw new BroadcastError('internal', 'Failed to create broadcast', 500);
+  }
 
-  const broadcastId = createdRows[0].broadcast_id as string;
+  const broadcastId = createdRows[0].broadcast_id;
 
   // Pair each inserted recipient row back to its phone/params by
   // contact_id — unambiguous now that duplicates are collapsed.
   const byContact = new Map(deduped.map((r) => [r.contactId, r]));
   const planned: PlannedRecipient[] = createdRows.map(
-    (row: { recipient_id: string; contact_id: string }) => {
+    (row) => {
       const r = byContact.get(row.contact_id)!;
       return { recipientRowId: row.recipient_id, phone: r.phone, params: r.params };
     }
   );
 
   return {
+    accountId,
     broadcastId,
     templateName,
     templateLanguage: resolvedTemplate.language,
@@ -262,9 +270,11 @@ export async function createBroadcast(
  * race and clobber the trigger-maintained counts.
  */
 export async function deliverBroadcast(
-  db: SupabaseClient,
+  run: Runner,
   plan: BroadcastPlan
 ): Promise<void> {
+  // Each recipient's stamp is its own short transaction: the Meta call
+  // in between must never hold a pooled connection open.
   for (const recipient of plan.planned) {
     const variants = phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
@@ -292,28 +302,21 @@ export async function deliverBroadcast(
       }
     }
 
-    if (sentMessageId) {
-      await db
-        .from('broadcast_recipients')
-        .update({
-          status: 'sent',
-          sent_at: new Date().toISOString(),
-          whatsapp_message_id: sentMessageId,
-          error_message: null,
-        })
-        .eq('id', recipient.recipientRowId);
-    } else {
-      await db
-        .from('broadcast_recipients')
-        .update({
-          status: 'failed',
-          error_message: lastError || 'Unknown error',
-        })
-        .eq('id', recipient.recipientRowId);
+    const outcome = sentMessageId
+      ? { id: recipient.recipientRowId, status: 'sent' as const, whatsapp_message_id: sentMessageId }
+      : { id: recipient.recipientRowId, status: 'failed' as const, error_message: lastError || 'Unknown error' };
+    try {
+      await run((db) => stampRecipient(db, plan.accountId, plan.broadcastId, outcome));
+    } catch (err) {
+      // A failed stamp must not strand the rest of the fan-out.
+      console.error(
+        '[broadcast-core] recipient stamp failed:',
+        err instanceof Error ? err.message : err
+      );
     }
   }
 
-  await finalizeBroadcastStatus(db, plan.broadcastId);
+  await finalizeBroadcastStatus(run, plan.accountId, plan.broadcastId);
 }
 
 /**
@@ -330,33 +333,28 @@ export async function deliverBroadcast(
  * terminal `status` is written here.
  */
 export async function finalizeBroadcastStatus(
-  db: SupabaseClient,
+  run: Runner,
+  accountId: string,
   broadcastId: string
 ): Promise<void> {
-  const countWhere = async (status: string): Promise<number> => {
-    const { count } = await db
-      .from('broadcast_recipients')
-      .select('id', { count: 'exact', head: true })
-      .eq('broadcast_id', broadcastId)
-      .eq('status', status);
-    return count ?? 0;
-  };
+  await run(async (db) => {
+    const status = terminalBroadcastStatus(
+      await recipientStatusCounts(db, accountId, broadcastId)
+    );
+    if (status) await setBroadcastTerminalStatus(db, accountId, broadcastId, status);
+  });
+}
 
-  // Still work outstanding (a capped resume pass) — leave it 'sending'
-  // so the UI keeps offering Resume.
-  if ((await countWhere('pending')) > 0) return;
-
-  const failed = await countWhere('failed');
-  const { count: total } = await db
-    .from('broadcast_recipients')
-    .select('id', { count: 'exact', head: true })
-    .eq('broadcast_id', broadcastId);
-
-  await db
-    .from('broadcasts')
-    .update({
-      status: failed > 0 && failed === (total ?? 0) ? 'failed' : 'sent',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', broadcastId);
+/**
+ * The terminal status for a broadcast's recipient tallies, or null while
+ * work is still outstanding (a capped resume pass) — it then stays
+ * 'sending' so the UI keeps offering Resume.
+ */
+export function terminalBroadcastStatus(counts: {
+  pending: number;
+  failed: number;
+  total: number;
+}): 'sent' | 'failed' | null {
+  if (counts.pending > 0) return null;
+  return counts.failed > 0 && counts.failed === counts.total ? 'failed' : 'sent';
 }
