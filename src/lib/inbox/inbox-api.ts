@@ -49,6 +49,9 @@ export function listInboxAgents() {
   return apiRequest<{ profiles: InboxAgent[] }>("/api/inbox/agents");
 }
 
+/** APPROVED templates of the account, newest first (shared templates route). */
 export function listApprovedTemplates() {
-  return apiRequest<{ templates: MessageTemplate[] }>("/api/inbox/templates");
+  return apiRequest<{ templates: MessageTemplate[] }>("/api/whatsapp/templates", {
+    query: { status: "APPROVED" },
+  });
 }

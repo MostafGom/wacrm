@@ -162,15 +162,21 @@ describe("messages + reactions repos", () => {
   let second: string;
 
   beforeAll(async () => {
+    const base = {
+      conversation_id: convA,
+      content_type: "text",
+      media_url: null,
+      template_name: null,
+      reply_to_message_id: null,
+    };
+    // Separate transactions: created_at defaults to now() (transaction
+    // start), so two inserts in one tx would tie on the sort key.
+    first = (
+      await asUser(owner.id, (db) =>
+        insertOutboundMessage(db, { ...base, content_text: "one", interactive_payload: null, message_id: "wamid.1" }),
+      )
+    ).id;
     await asUser(owner.id, async (db) => {
-      const base = {
-        conversation_id: convA,
-        content_type: "text",
-        media_url: null,
-        template_name: null,
-        reply_to_message_id: null,
-      };
-      first = (await insertOutboundMessage(db, { ...base, content_text: "one", interactive_payload: null, message_id: "wamid.1" })).id;
       const row = await insertOutboundMessage(db, {
         ...base,
         content_type: "interactive",

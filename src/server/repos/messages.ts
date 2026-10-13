@@ -144,17 +144,6 @@ export async function updateWhatsAppAccessToken(
     .execute();
 }
 
-/** APPROVED templates of the account, newest first (inbox template picker). */
-export function listApprovedTemplates(db: Db, accountId: string) {
-  return db
-    .selectFrom("message_templates")
-    .selectAll()
-    .where("account_id", "=", accountId)
-    .where("status", "=", "APPROVED")
-    .orderBy("created_at", "desc")
-    .execute();
-}
-
 /** Pause the contact's active Flow runs — an agent stepped in. */
 export async function pauseActiveFlowRunsForContact(db: Db, accountId: string, contactId: string): Promise<void> {
   await db
