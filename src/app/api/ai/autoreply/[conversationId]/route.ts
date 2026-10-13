@@ -2,6 +2,12 @@ import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import {
+  conversationExists,
+  updateConversationAi,
+  type ConversationAiPatch,
+} from '@/server/repos/ai-conversations'
 
 const t = getT('Api')
 
@@ -24,12 +30,12 @@ type Params = { params: Promise<{ conversationId: string }> }
  *                     caller currently owns the thread, unassign it too so
  *                     the bot isn't blocked by the "human owns this" gate.
  *
- * Writes go through the RLS-scoped SSR client, so a conversation outside
- * the caller's account simply isn't found (404).
+ * Reads and writes run as the caller (RLS) and are scoped to their
+ * account, so a conversation outside it simply isn't found (404).
  */
 export async function POST(request: Request, { params }: Params) {
   try {
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { accountId, userId } = await requireRole('agent')
 
     // Reuse the send bucket: this is a cheap per-user inbox action and
     // toggling it in a tight loop has no legitimate use.
@@ -48,13 +54,12 @@ export async function POST(request: Request, { params }: Params) {
     const assignToMe = body.assign_to_me === true
 
     // Confirm the conversation is in the caller's account before writing.
-    const { data: conv, error: convErr } = await supabase
-      .from('conversations')
-      .select('id')
-      .eq('id', conversationId)
-      .eq('account_id', accountId)
-      .maybeSingle()
-    if (convErr) {
+    let conv: boolean
+    try {
+      conv = await asUser(userId, (db) =>
+        conversationExists(db, accountId, conversationId),
+      )
+    } catch (convErr) {
       console.error('[ai/autoreply] conversation lookup error:', convErr)
       return NextResponse.json(
         { error: t('common.failedToLoadConversation') },
@@ -65,7 +70,7 @@ export async function POST(request: Request, { params }: Params) {
       return NextResponse.json({ error: t('common.conversationNotFound') }, { status: 404 })
     }
 
-    const update: Record<string, unknown> = { ai_autoreply_disabled: paused }
+    const update: ConversationAiPatch = { ai_autoreply_disabled: paused }
 
     if (paused) {
       if (assignToMe) update.assigned_agent_id = userId
@@ -86,12 +91,11 @@ export async function POST(request: Request, { params }: Params) {
       update.ai_handoff_summary = null
     }
 
-    const { error: upErr } = await supabase
-      .from('conversations')
-      .update(update)
-      .eq('id', conversationId)
-      .eq('account_id', accountId)
-    if (upErr) {
+    try {
+      await asUser(userId, (db) =>
+        updateConversationAi(db, accountId, conversationId, update),
+      )
+    } catch (upErr) {
       console.error('[ai/autoreply] update error:', upErr)
       return NextResponse.json(
         { error: t('ai.updateConversationFailed') },

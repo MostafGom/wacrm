@@ -1,17 +1,17 @@
 import { describe, it, expect, vi } from 'vitest'
-import { logAiUsage } from './usage'
-import type { SupabaseClient } from '@/lib/db'
+import type { Db, Runner } from '@/server/db'
 
-function fakeDb() {
-  const insert = vi.fn().mockResolvedValue({ error: null })
-  const db = { from: vi.fn(() => ({ insert })) }
-  return { db: db as unknown as SupabaseClient, insert, from: db.from }
-}
+const h = vi.hoisted(() => ({ insertAiUsageLog: vi.fn() }))
+vi.mock('@/server/repos/ai-usage', () => h)
+
+import { logAiUsage } from './usage'
+
+const run: Runner = (fn) => fn({} as Db)
 
 describe('logAiUsage', () => {
   it('inserts a row mapping normalized usage to the log columns', async () => {
-    const { db, insert, from } = fakeDb()
-    await logAiUsage(db, {
+    h.insertAiUsageLog.mockResolvedValue(undefined)
+    await logAiUsage(run, {
       accountId: 'acct-1',
       conversationId: 'conv-1',
       mode: 'auto_reply',
@@ -19,8 +19,7 @@ describe('logAiUsage', () => {
       model: 'claude-x',
       usage: { promptTokens: 30, completionTokens: 6, totalTokens: 36 },
     })
-    expect(from).toHaveBeenCalledWith('ai_usage_log')
-    expect(insert).toHaveBeenCalledWith({
+    expect(h.insertAiUsageLog).toHaveBeenCalledWith({}, {
       account_id: 'acct-1',
       conversation_id: 'conv-1',
       mode: 'auto_reply',
@@ -33,8 +32,7 @@ describe('logAiUsage', () => {
   })
 
   it('is a no-op when the provider reported no usage', async () => {
-    const { db, from } = fakeDb()
-    await logAiUsage(db, {
+    await logAiUsage(run, {
       accountId: 'acct-1',
       conversationId: null,
       mode: 'draft',
@@ -42,14 +40,14 @@ describe('logAiUsage', () => {
       model: 'gpt-x',
       usage: null,
     })
-    expect(from).not.toHaveBeenCalled()
+    expect(h.insertAiUsageLog).not.toHaveBeenCalled()
   })
 
   it('never throws when the insert errors', async () => {
-    const insert = vi.fn().mockResolvedValue({ error: { message: 'boom' } })
-    const db = { from: vi.fn(() => ({ insert })) } as unknown as SupabaseClient
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    h.insertAiUsageLog.mockRejectedValue(new Error('boom'))
     await expect(
-      logAiUsage(db, {
+      logAiUsage(run, {
         accountId: 'acct-1',
         conversationId: 'conv-1',
         mode: 'draft',
@@ -58,5 +56,6 @@ describe('logAiUsage', () => {
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
       }),
     ).resolves.toBeUndefined()
+    err.mockRestore()
   })
 })

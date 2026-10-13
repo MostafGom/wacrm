@@ -1,4 +1,5 @@
-import type { SupabaseClient } from '@/lib/db'
+import type { Runner } from '@/server/db'
+import { insertAiUsageLog } from '@/server/repos/ai-usage'
 import type { AiProvider, AiUsage } from './types'
 
 export interface LogAiUsageArgs {
@@ -20,32 +21,29 @@ export interface LogAiUsageArgs {
  * logged and swallowed. Skips entirely when the provider didn't report
  * usage (we'd only be writing zeros).
  *
- * Pass the service-role admin client from the webhook, or the RLS-scoped
- * SSR client from a route — writes land either way (there's no
- * `authenticated` INSERT policy, so an SSR write relies on the service
- * role; callers that must persist from a route should pass the admin
- * client).
+ * Pass `serviceRunner`: there's no `authenticated` INSERT policy on the
+ * log, so a user-role write would be rejected (and swallowed here).
  */
 export async function logAiUsage(
-  db: SupabaseClient,
+  run: Runner,
   args: LogAiUsageArgs,
 ): Promise<void> {
   if (!args.usage) return
+  const usage = args.usage
   try {
-    const { error } = await db.from('ai_usage_log').insert({
-      account_id: args.accountId,
-      conversation_id: args.conversationId,
-      mode: args.mode,
-      provider: args.provider,
-      model: args.model,
-      prompt_tokens: args.usage.promptTokens,
-      completion_tokens: args.usage.completionTokens,
-      total_tokens: args.usage.totalTokens,
-    })
-    if (error) {
-      console.error('[ai usage] log insert failed:', error)
-    }
+    await run((db) =>
+      insertAiUsageLog(db, {
+        account_id: args.accountId,
+        conversation_id: args.conversationId,
+        mode: args.mode,
+        provider: args.provider,
+        model: args.model,
+        prompt_tokens: usage.promptTokens,
+        completion_tokens: usage.completionTokens,
+        total_tokens: usage.totalTokens,
+      }),
+    )
   } catch (err) {
-    console.error('[ai usage] log insert threw:', err)
+    console.error('[ai usage] log insert failed:', err)
   }
 }

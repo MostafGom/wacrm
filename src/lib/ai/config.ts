@@ -1,22 +1,7 @@
-import type { SupabaseClient } from '@/lib/db'
+import type { Runner } from '@/server/db'
+import { getAiConfigSecrets, getEmbeddingsKeyCipher } from '@/server/repos/ai-config'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import type { AiConfig } from './types'
-
-interface AiConfigRow {
-  provider: 'openai' | 'anthropic' | 'openai_compatible'
-  model: string
-  base_url: string | null
-  api_key: string
-  system_prompt: string | null
-  is_active: boolean
-  auto_reply_enabled: boolean
-  auto_reply_max_per_conversation: number
-  handoff_agent_id: string | null
-  embeddings_api_key: string | null
-}
-
-const CONFIG_COLUMNS =
-  'provider, model, base_url, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key'
 
 /**
  * Load and decrypt the account's AI config for *use* (draft or
@@ -26,25 +11,18 @@ const CONFIG_COLUMNS =
  * (mismatched `ENCRYPTION_KEY`), so that distinct failure surfaces
  * rather than looking like "not configured".
  *
- * Works with any client: pass the RLS-scoped SSR client from a
- * dashboard route, or the service-role admin client from the webhook.
+ * Works under any role: pass `userRunner(userId)` from a dashboard
+ * route, or `serviceRunner` from the webhook.
  */
 export async function loadAiConfig(
-  db: SupabaseClient,
+  run: Runner,
   accountId: string,
   opts: { requireActive?: boolean } = {},
 ): Promise<AiConfig | null> {
   const { requireActive = true } = opts
-  const { data, error } = await db
-    .from('ai_configs')
-    .select(CONFIG_COLUMNS)
-    .eq('account_id', accountId)
-    .maybeSingle()
+  const row = await run((db) => getAiConfigSecrets(db, accountId))
+  if (!row) return null
 
-  if (error) throw error
-  if (!data) return null
-
-  const row = data as AiConfigRow
   // The Playground passes requireActive:false so an admin can test the
   // agent before flipping the master switch on.
   if (requireActive && !row.is_active) return null
@@ -96,17 +74,18 @@ export async function loadAiConfig(
  * lexical-only and reporting success.
  */
 export async function loadEmbeddingsKey(
-  db: SupabaseClient,
+  run: Runner,
   accountId: string,
 ): Promise<{ key: string | null; corrupt: boolean }> {
-  const { data, error } = await db
-    .from('ai_configs')
-    .select('embeddings_api_key')
-    .eq('account_id', accountId)
-    .maybeSingle()
-  if (error || !data?.embeddings_api_key) return { key: null, corrupt: false }
+  let cipher: string | null
   try {
-    return { key: decrypt(data.embeddings_api_key), corrupt: false }
+    cipher = await run((db) => getEmbeddingsKeyCipher(db, accountId))
+  } catch {
+    return { key: null, corrupt: false }
+  }
+  if (!cipher) return { key: null, corrupt: false }
+  try {
+    return { key: decrypt(cipher), corrupt: false }
   } catch {
     console.error(
       `[ai config] embeddings key for account ${accountId} could not be decrypted — check ENCRYPTION_KEY.`,

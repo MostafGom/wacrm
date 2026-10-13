@@ -8,9 +8,10 @@ import { generateReply } from '@/lib/ai/generate'
 import { buildSystemPrompt } from '@/lib/ai/defaults'
 import { latestUserMessage } from '@/lib/ai/query'
 import { logAiUsage } from '@/lib/ai/usage'
-import { supabaseAdmin } from '@/lib/ai/admin-client'
 import { AiError } from '@/lib/ai/types'
 import { getT } from '@/lib/i18n/translate'
+import { asUser, serviceRunner, userRunner } from '@/server/db'
+import { conversationExists } from '@/server/repos/ai-conversations'
 
 const t = getT('Api')
 
@@ -25,7 +26,8 @@ const t = getT('Api')
  */
 export async function POST(request: Request) {
   try {
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { accountId, userId } = await requireRole('agent')
+    const run = userRunner(userId)
 
     const userLimit = checkRateLimit(`ai-draft:${userId}`, RATE_LIMITS.aiDraft)
     if (!userLimit.success) return rateLimitResponse(userLimit)
@@ -46,14 +48,14 @@ export async function POST(request: Request) {
       )
     }
 
-    // RLS scopes the SSR client to the caller's account, so a missing
-    // row means "not yours / not found" either way.
-    const { data: conversation, error: convErr } = await supabase
-      .from('conversations')
-      .select('id')
-      .eq('id', conversationId)
-      .maybeSingle()
-    if (convErr) {
+    // Scoped to the caller's account (and RLS), so a missing row means
+    // "not yours / not found" either way.
+    let conversation: boolean
+    try {
+      conversation = await asUser(userId, (db) =>
+        conversationExists(db, accountId, conversationId),
+      )
+    } catch (convErr) {
       console.error('[ai/draft] conversation lookup error:', convErr)
       return NextResponse.json({ error: t('common.failedToLoadConversation') }, { status: 500 })
     }
@@ -61,7 +63,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: t('common.conversationNotFound') }, { status: 404 })
     }
 
-    const config = await loadAiConfig(supabase, accountId).catch((err) => {
+    const config = await loadAiConfig(run, accountId).catch((err) => {
       // Decrypt failure — surface distinctly from "not configured".
       console.error('[ai/draft] loadAiConfig error:', err)
       throw new AiError(t('ai.storedKeyUndecryptable'), {
@@ -79,7 +81,7 @@ export async function POST(request: Request) {
       )
     }
 
-    const messages = await buildConversationContext(supabase, conversationId)
+    const messages = await buildConversationContext(run, accountId, conversationId)
     // Nothing to draft from — a brand-new thread with no customer text
     // would otherwise produce a nonsensical reply-to-nothing.
     if (messages.length === 0) {
@@ -95,7 +97,7 @@ export async function POST(request: Request) {
     // Ground the draft in the account's knowledge base (best-effort —
     // returns [] when there's no KB or retrieval fails).
     const knowledge = await retrieveKnowledge(
-      supabase,
+      run,
       accountId,
       config,
       latestUserMessage(messages),
@@ -111,23 +113,17 @@ export async function POST(request: Request) {
 
     // Record spend on the account's BYO key. Best-effort + via the
     // service role (the log has no `authenticated` INSERT policy). This
-    // must not fail or delay the draft the agent is waiting on, so:
-    //  - the whole thing is wrapped (constructing the admin client throws
-    //    if the service-role key is unset — that must not 500 the draft);
-    //  - it's fire-and-forget (`void`), not awaited, so the response
-    //    isn't held for a DB round-trip.
-    try {
-      void logAiUsage(supabaseAdmin(), {
-        accountId,
-        conversationId,
-        mode: 'draft',
-        provider: config.provider,
-        model: config.model,
-        usage,
-      })
-    } catch (logErr) {
-      console.error('[ai/draft] usage log skipped:', logErr)
-    }
+    // must not fail or delay the draft the agent is waiting on, so it's
+    // fire-and-forget (`void`), not awaited — `logAiUsage` swallows its
+    // own errors, so the floating promise can't reject.
+    void logAiUsage(serviceRunner, {
+      accountId,
+      conversationId,
+      mode: 'draft',
+      provider: config.provider,
+      model: config.model,
+      usage,
+    })
 
     return NextResponse.json({ draft: text })
   } catch (err) {

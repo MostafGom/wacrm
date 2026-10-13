@@ -1,13 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { SupabaseClient } from '@/lib/db'
+import type { Db, Runner } from '@/server/db'
 
 const h = vi.hoisted(() => ({ embedTexts: vi.fn() }))
 vi.mock('./embeddings', () => ({
   embedTexts: h.embedTexts,
   toVectorLiteral: (v: number[]) => `[${v.join(',')}]`,
 }))
-
-import { retrieveKnowledge, ingestDocument } from './knowledge'
 
 interface FakeState {
   semantic: { id: string; content: string }[]
@@ -16,7 +14,35 @@ interface FakeState {
   rpcCalls: string[]
   inserted: Record<string, unknown>[] | null
   deletedFor: string | null
+  /** Repo calls made while a provider call was in flight (must stay 0). */
+  inFlight: number
 }
+
+const repo = vi.hoisted(() => ({ state: null as unknown as FakeState }))
+vi.mock('@/server/repos/ai-knowledge', () => ({
+  countKnowledgeChunks: async () => repo.state.chunkCount,
+  matchKnowledgeSemantic: async () => {
+    repo.state.rpcCalls.push('match_ai_knowledge_semantic')
+    return repo.state.semantic
+  },
+  matchKnowledgeFts: async () => {
+    repo.state.rpcCalls.push('match_ai_knowledge_fts')
+    return repo.state.fts
+  },
+  replaceDocumentChunks: async (
+    _db: unknown,
+    accountId: string,
+    documentId: string,
+    rows: Record<string, unknown>[],
+  ) => {
+    repo.state.deletedFor = documentId
+    if (rows.length > 0) {
+      repo.state.inserted = rows.map((r) => ({ ...r, account_id: accountId }))
+    }
+  },
+}))
+
+import { retrieveKnowledge, ingestDocument } from './knowledge'
 
 function makeDb() {
   const state: FakeState = {
@@ -26,41 +52,29 @@ function makeDb() {
     rpcCalls: [],
     inserted: null,
     deletedFor: null,
+    inFlight: 0,
   }
-  const db = {
-    rpc: (name: string) => {
-      state.rpcCalls.push(name)
-      if (name === 'match_ai_knowledge_semantic')
-        return Promise.resolve({ data: state.semantic, error: null })
-      if (name === 'match_ai_knowledge_fts')
-        return Promise.resolve({ data: state.fts, error: null })
-      return Promise.resolve({ data: null, error: null })
-    },
-    from: () => ({
-      // retrieveKnowledge's empty-KB count guard.
-      select: () => ({
-        eq: () => Promise.resolve({ count: state.chunkCount, error: null }),
-      }),
-      delete: () => ({
-        eq: (_col: string, val: string) => {
-          state.deletedFor = val
-          return Promise.resolve({ error: null })
-        },
-      }),
-      insert: (rows: Record<string, unknown>[]) => {
-        state.inserted = rows
-        return Promise.resolve({ error: null })
-      },
-    }),
+  repo.state = state
+  // Each `run` is its own transaction; track that no provider call
+  // happens while one is open.
+  let open = 0
+  const db: Runner = async (fn) => {
+    open += 1
+    try {
+      return await fn({} as Db)
+    } finally {
+      open -= 1
+    }
   }
-  return { db: db as unknown as SupabaseClient, state }
+  h.embedTexts.mockImplementation(async (_key: string, inputs: string[]) => {
+    if (open > 0) state.inFlight += 1
+    return inputs.map((_, i) => [i, i])
+  })
+  return { db, state }
 }
 
 beforeEach(() => {
   h.embedTexts.mockReset()
-  h.embedTexts.mockImplementation(async (_key: string, inputs: string[]) =>
-    inputs.map((_, i) => [i, i]),
-  )
 })
 
 describe('retrieveKnowledge', () => {
@@ -98,6 +112,7 @@ describe('retrieveKnowledge', () => {
     const out = await retrieveKnowledge(db, 'acct', { embeddingsApiKey: 'sk-x' }, 'q', 3)
     expect(out).toEqual(['S1', 'S2', 'S3'])
     expect(h.embedTexts).toHaveBeenCalledTimes(1)
+    expect(state.inFlight).toBe(0)
     // Enough semantic hits → no FTS top-up.
     expect(state.rpcCalls).toEqual(['match_ai_knowledge_semantic'])
   })
@@ -130,6 +145,8 @@ describe('ingestDocument', () => {
     expect(state.inserted).toHaveLength(1)
     expect(state.inserted![0].embedding).toBe('[0,0]') // literal from mocked embed
     expect(state.inserted![0].account_id).toBe('acct')
+    // The embeddings call ran outside any DB transaction.
+    expect(state.inFlight).toBe(0)
   })
 
   it('stores chunks without embeddings when there is no key', async () => {

@@ -29,9 +29,9 @@ interface EmbeddingResponse {
   data?: { embedding?: number[]; index?: number }[]
 }
 
-/** Format a vector for a pgvector column / RPC param: `[0.1,0.2,...]`.
- *  PostgREST casts this text literal to `vector`; a raw JS array does
- *  not cast reliably. */
+/** Format a vector for a pgvector column / SQL function param:
+ *  `[0.1,0.2,...]`. Postgres parses this text literal as `vector`; a raw
+ *  JS array would be sent as a Postgres array and not cast. */
 export function toVectorLiteral(embedding: number[]): string {
   return `[${embedding.join(',')}]`
 }

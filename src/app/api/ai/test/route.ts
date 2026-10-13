@@ -6,6 +6,8 @@ import { validateAiCredentials } from '@/lib/ai/validate'
 import { AiError, type AiProvider } from '@/lib/ai/types'
 import { normalizeOpenAiCompatibleBaseUrl } from '@/lib/ai/providers/openai-compatible'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { getAiConfigCredentials } from '@/server/repos/ai-config'
 
 const t = getT('Api')
 
@@ -20,7 +22,7 @@ const t = getT('Api')
  */
 export async function POST(request: Request) {
   try {
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
 
     const limit = checkRateLimit(`ai-test:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
@@ -48,12 +50,9 @@ export async function POST(request: Request) {
     const rawKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
     let apiKeyPlain = rawKey
     if (!apiKeyPlain || provider === 'openai_compatible') {
-      const { data } = await supabase
-        .from('ai_configs')
-        .select('api_key, provider, base_url')
-        .eq('account_id', accountId)
-        .maybeSingle()
-      existing = data as unknown as { api_key: string; provider: AiProvider; base_url: string | null } | null
+      existing =
+        (await asUser(userId, (db) => getAiConfigCredentials(db, accountId))) ??
+        null
     }
     if (!apiKeyPlain) {
       if (!existing?.api_key) {

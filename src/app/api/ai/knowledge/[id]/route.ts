@@ -9,6 +9,12 @@ import { loadEmbeddingsKey } from '@/lib/ai/config'
 import { ingestDocument } from '@/lib/ai/knowledge'
 import { AiError } from '@/lib/ai/types'
 import { getT } from '@/lib/i18n/translate'
+import { asUser, userRunner } from '@/server/db'
+import {
+  deleteKnowledgeDocument,
+  getKnowledgeDocument,
+  updateKnowledgeDocument,
+} from '@/server/repos/ai-knowledge'
 
 const t = getT('Api')
 
@@ -19,15 +25,12 @@ type Params = { params: Promise<{ id: string }> }
  */
 export async function GET(_request: Request, { params }: Params) {
   try {
-    const { supabase, accountId } = await getCurrentAccount()
+    const { userId, accountId } = await getCurrentAccount()
     const { id } = await params
-    const { data, error } = await supabase
-      .from('ai_knowledge_documents')
-      .select('id, title, content, updated_at')
-      .eq('account_id', accountId)
-      .eq('id', id)
-      .maybeSingle()
-    if (error) {
+    let data: Awaited<ReturnType<typeof getKnowledgeDocument>>
+    try {
+      data = await asUser(userId, (db) => getKnowledgeDocument(db, accountId, id))
+    } catch (error) {
       console.error('[ai/knowledge/[id] GET] error:', error)
       return NextResponse.json({ error: t('ai.knowledge.loadDocFailed') }, { status: 500 })
     }
@@ -44,7 +47,8 @@ export async function GET(_request: Request, { params }: Params) {
  */
 export async function PATCH(request: Request, { params }: Params) {
   try {
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
+    const run = userRunner(userId)
     const limit = checkRateLimit(`ai-kb:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
 
@@ -62,18 +66,16 @@ export async function PATCH(request: Request, { params }: Params) {
       return NextResponse.json({ error: t('ai.knowledge.contentEmpty') }, { status: 400 })
     }
 
-    const update: Record<string, string> = {}
+    const update: { title?: string; content?: string } = {}
     if (title !== undefined) update.title = title
     if (content !== undefined) update.content = content
 
-    const { data: updated, error } = await supabase
-      .from('ai_knowledge_documents')
-      .update(update)
-      .eq('account_id', accountId)
-      .eq('id', id)
-      .select('id')
-      .maybeSingle()
-    if (error) {
+    let updated: { id: string } | undefined
+    try {
+      updated = await run((db) =>
+        updateKnowledgeDocument(db, accountId, id, update),
+      )
+    } catch (error) {
       console.error('[ai/knowledge/[id] PATCH] error:', error)
       return NextResponse.json({ error: t('ai.knowledge.updateDocFailed') }, { status: 500 })
     }
@@ -81,11 +83,11 @@ export async function PATCH(request: Request, { params }: Params) {
 
     if (content !== undefined) {
       const { key: embeddingsApiKey, corrupt } = await loadEmbeddingsKey(
-        supabase,
+        run,
         accountId,
       )
       try {
-        await ingestDocument(supabase, accountId, { embeddingsApiKey }, id, content)
+        await ingestDocument(run, accountId, { embeddingsApiKey }, id, content)
       } catch (err) {
         const message = err instanceof AiError ? err.message : t('ai.knowledge.indexingFailed')
         console.error('[ai/knowledge/[id] PATCH] ingest error:', err)
@@ -117,14 +119,11 @@ export async function PATCH(request: Request, { params }: Params) {
  */
 export async function DELETE(_request: Request, { params }: Params) {
   try {
-    const { supabase, accountId } = await requireRole('admin')
+    const { userId, accountId } = await requireRole('admin')
     const { id } = await params
-    const { error } = await supabase
-      .from('ai_knowledge_documents')
-      .delete()
-      .eq('account_id', accountId)
-      .eq('id', id)
-    if (error) {
+    try {
+      await asUser(userId, (db) => deleteKnowledgeDocument(db, accountId, id))
+    } catch (error) {
       console.error('[ai/knowledge/[id] DELETE] error:', error)
       return NextResponse.json({ error: t('ai.knowledge.deleteDocFailed') }, { status: 500 })
     }

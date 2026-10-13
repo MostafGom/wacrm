@@ -5,6 +5,8 @@ import { loadEmbeddingsKey } from '@/lib/ai/config'
 import { ingestDocument } from '@/lib/ai/knowledge'
 import { AiError } from '@/lib/ai/types'
 import { getT } from '@/lib/i18n/translate'
+import { userRunner } from '@/server/db'
+import { listKnowledgeDocumentContents } from '@/server/repos/ai-knowledge'
 
 const t = getT('Api')
 
@@ -18,15 +20,15 @@ const t = getT('Api')
  */
 export async function POST() {
   try {
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
+    const run = userRunner(userId)
     const limit = checkRateLimit(`ai-kb-reindex:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
 
-    const { data: docs, error } = await supabase
-      .from('ai_knowledge_documents')
-      .select('id, content')
-      .eq('account_id', accountId)
-    if (error) {
+    let docs: { id: string; content: string }[]
+    try {
+      docs = await run((db) => listKnowledgeDocumentContents(db, accountId))
+    } catch (error) {
       console.error('[ai/knowledge/reindex] fetch error:', error)
       return NextResponse.json(
         { error: t('ai.knowledge.loadDocsFailed') },
@@ -35,7 +37,7 @@ export async function POST() {
     }
 
     const { key: embeddingsApiKey, corrupt } = await loadEmbeddingsKey(
-      supabase,
+      run,
       accountId,
     )
     // The whole point of Reindex is usually to backfill embeddings — so
@@ -54,9 +56,9 @@ export async function POST() {
     }
 
     let reindexed = 0
-    for (const doc of docs ?? []) {
+    for (const doc of docs) {
       try {
-        await ingestDocument(supabase, accountId, { embeddingsApiKey }, doc.id, doc.content)
+        await ingestDocument(run, accountId, { embeddingsApiKey }, doc.id, doc.content)
         reindexed += 1
       } catch (err) {
         // One bad document (e.g. a mid-run embeddings rate-limit) should
@@ -67,7 +69,7 @@ export async function POST() {
           {
             success: false,
             reindexed,
-            total: (docs ?? []).length,
+            total: docs.length,
             error: t('ai.knowledge.reindexPartial', { reindexed, message }),
           },
           { status: 200 },

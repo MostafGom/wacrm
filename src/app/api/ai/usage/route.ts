@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { daysAgoStart, lastNDayKeys, localDayKey } from '@/lib/dashboard/date-utils'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { listAiUsageSince, type AiUsageRow } from '@/server/repos/ai-usage'
 
 const t = getT('Api')
 
@@ -13,16 +15,6 @@ const t = getT('Api')
 const MAX_ROWS = 10_000
 const DEFAULT_WINDOW_DAYS = 30
 
-interface UsageRow {
-  created_at: string
-  mode: 'auto_reply' | 'draft'
-  provider: string
-  model: string
-  prompt_tokens: number
-  completion_tokens: number
-  total_tokens: number
-}
-
 /**
  * GET /api/ai/usage?days=30  (admin+)
  *
@@ -33,7 +25,7 @@ interface UsageRow {
  */
 export async function GET(request: Request) {
   try {
-    const { supabase, accountId } = await requireRole('admin')
+    const { userId, accountId } = await requireRole('admin')
 
     const url = new URL(request.url)
     const rawDays = Number(url.searchParams.get('days'))
@@ -54,17 +46,12 @@ export async function GET(request: Request) {
     // chart (see lib/dashboard/date-utils).
     const since = daysAgoStart(days - 1)
 
-    const { data, error } = await supabase
-      .from('ai_usage_log')
-      .select(
-        'created_at, mode, provider, model, prompt_tokens, completion_tokens, total_tokens',
+    let all: AiUsageRow[]
+    try {
+      all = await asUser(userId, (db) =>
+        listAiUsageSince(db, accountId, since.toISOString(), MAX_ROWS + 1),
       )
-      .eq('account_id', accountId)
-      .gte('created_at', since.toISOString())
-      .order('created_at', { ascending: false })
-      .limit(MAX_ROWS + 1)
-
-    if (error) {
+    } catch (error) {
       console.error('[ai/usage GET] fetch error:', error)
       return NextResponse.json(
         { error: t('ai.loadUsageFailed') },
@@ -72,7 +59,6 @@ export async function GET(request: Request) {
       )
     }
 
-    const all = (data ?? []) as UsageRow[]
     const truncated = all.length > MAX_ROWS
     const rows = truncated ? all.slice(0, MAX_ROWS) : all
 

@@ -1,4 +1,11 @@
-import { supabaseAdmin } from './admin-client'
+import { serviceRunner as run } from '@/server/db'
+import {
+  claimAiReplySlot,
+  getConversationAiState,
+  hasActiveMessageAutoResponder,
+  updateConversationAi,
+  type ConversationAiPatch,
+} from '@/server/repos/ai-conversations'
 import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
 import { retrieveKnowledge } from './knowledge'
@@ -59,9 +66,10 @@ export async function dispatchInboundToAiReply(
   } = args
 
   try {
-    const db = supabaseAdmin()
-
-    const config = await loadAiConfig(db, accountId)
+    // Engine path: every DB step runs under the service role, scoped
+    // by accountId explicitly; each `run` is its own short transaction
+    // so no provider / Meta call ever happens inside one.
+    const config = await loadAiConfig(run, accountId)
     if (!config || !config.autoReplyEnabled) return
 
     // Deterministic, user-configured responders win over the LLM — the
@@ -72,28 +80,19 @@ export async function dispatchInboundToAiReply(
     // avoid double-texting the customer. (Relationship triggers like
     // `first_inbound_message` don't count — they're not per-message
     // auto-responders.)
-    const { data: autoResponders } = await db
-      .from('automations')
-      .select('id')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .in('trigger_type', ['new_message_received', 'keyword_match'])
-      .limit(1)
-    if (autoResponders && autoResponders.length > 0) return
-
-    const { data: conv, error: convErr } = await db
-      .from('conversations')
-      .select('assigned_agent_id, ai_autoreply_disabled, ai_reply_count')
-      .eq('id', conversationId)
-      .maybeSingle()
-    if (convErr || !conv) return
+    const { hasAutoResponder, conv } = await run(async (db) => ({
+      hasAutoResponder: await hasActiveMessageAutoResponder(db, accountId),
+      conv: await getConversationAiState(db, accountId, conversationId),
+    }))
+    if (hasAutoResponder) return
+    if (!conv) return
     if (conv.assigned_agent_id) return // a human owns this thread
     if (conv.ai_autoreply_disabled) return // handed off / turned off here
     // Cheap early-out; the authoritative cap check is the atomic claim
     // below (this read can race a concurrent inbound).
     if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return
 
-    const messages = await buildConversationContext(db, conversationId)
+    const messages = await buildConversationContext(run, accountId, conversationId)
     if (messages.length === 0) return
 
     // Account-wide throttle on the shared BYO key. The per-conversation
@@ -119,12 +118,12 @@ export async function dispatchInboundToAiReply(
     // nothing to undo on the handoff / no-text path. Strictly
     // best-effort: a failed indicator must never cost us the reply.
     if (inboundMessageId) {
-      await showTypingIndicator(db, accountId, inboundMessageId)
+      await showTypingIndicator(accountId, inboundMessageId)
     }
 
     // Ground the reply in the account's knowledge base (best-effort).
     const knowledge = await retrieveKnowledge(
-      db,
+      run,
       accountId,
       config,
       latestUserMessage(messages),
@@ -147,7 +146,7 @@ export async function dispatchInboundToAiReply(
     // swallows its own errors, so the floating promise can't reject.
     // Logged regardless of handoff — the provider call happened either
     // way.
-    void logAiUsage(db, {
+    void logAiUsage(run, {
       accountId,
       conversationId,
       mode: 'auto_reply',
@@ -168,7 +167,7 @@ export async function dispatchInboundToAiReply(
         messages,
         replyCount: conv.ai_reply_count ?? 0,
       })
-      const update: Record<string, unknown> = {
+      const update: ConversationAiPatch = {
         ai_autoreply_disabled: true,
         ai_handoff_summary: summary,
       }
@@ -177,7 +176,9 @@ export async function dispatchInboundToAiReply(
       if (config.handoffAgentId && !conv.assigned_agent_id) {
         update.assigned_agent_id = config.handoffAgentId
       }
-      await db.from('conversations').update(update).eq('id', conversationId)
+      await run((db) =>
+        updateConversationAi(db, accountId, conversationId, update),
+      )
       return
     }
 
@@ -186,14 +187,16 @@ export async function dispatchInboundToAiReply(
     // another inbound just took the last slot, `claimed` is false and we
     // skip the send. (We consume a slot slightly before the send lands —
     // fail-safe: under-reply rather than over-reply.)
-    const { data: claimed, error: claimErr } = await db.rpc(
-      'claim_ai_reply_slot',
-      {
-        conversation_id: conversationId,
-        max_replies: config.autoReplyMaxPerConversation,
-      },
-    )
-    if (claimErr) {
+    let claimed: boolean
+    try {
+      claimed = await run((db) =>
+        claimAiReplySlot(
+          db,
+          conversationId,
+          config.autoReplyMaxPerConversation,
+        ),
+      )
+    } catch (claimErr) {
       // A real error here (vs. losing the cap race) is almost always a
       // deploy issue — e.g. `claim_ai_reply_slot` not EXECUTE-able by the
       // service role, or the migration not applied. Log it loudly: a
@@ -201,7 +204,7 @@ export async function dispatchInboundToAiReply(
       console.error('[ai auto-reply] claim_ai_reply_slot failed:', claimErr)
       return
     }
-    if (claimed !== true) return // lost the per-conversation cap race
+    if (!claimed) return // lost the per-conversation cap race
 
     await engineSendText({
       accountId,
@@ -222,7 +225,6 @@ export async function dispatchInboundToAiReply(
  * — the indicator is cosmetic, the reply is not.
  */
 async function showTypingIndicator(
-  db: ReturnType<typeof supabaseAdmin>,
   accountId: string,
   inboundMessageId: string,
 ): Promise<void> {

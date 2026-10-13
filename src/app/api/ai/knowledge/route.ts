@@ -9,6 +9,11 @@ import { loadEmbeddingsKey } from '@/lib/ai/config'
 import { ingestDocument } from '@/lib/ai/knowledge'
 import { AiError } from '@/lib/ai/types'
 import { getT } from '@/lib/i18n/translate'
+import { asUser, userRunner } from '@/server/db'
+import {
+  insertKnowledgeDocument,
+  listKnowledgeDocuments,
+} from '@/server/repos/ai-knowledge'
 
 const t = getT('Api')
 
@@ -19,20 +24,20 @@ const t = getT('Api')
  */
 export async function GET() {
   try {
-    const { supabase, accountId } = await getCurrentAccount()
-    const { data, error } = await supabase
-      .from('ai_knowledge_documents')
-      .select('id, title, updated_at')
-      .eq('account_id', accountId)
-      .order('updated_at', { ascending: false })
-    if (error) {
+    const { userId, accountId } = await getCurrentAccount()
+    let documents: Awaited<ReturnType<typeof listKnowledgeDocuments>>
+    try {
+      documents = await asUser(userId, (db) =>
+        listKnowledgeDocuments(db, accountId),
+      )
+    } catch (error) {
       console.error('[ai/knowledge GET] error:', error)
       return NextResponse.json(
         { error: t('ai.knowledge.loadKbFailed') },
         { status: 500 },
       )
     }
-    return NextResponse.json({ documents: data ?? [] })
+    return NextResponse.json({ documents })
   } catch (err) {
     return toErrorResponse(err)
   }
@@ -46,7 +51,8 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
+    const run = userRunner(userId)
     const limit = checkRateLimit(`ai-kb:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
 
@@ -60,12 +66,17 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: doc, error } = await supabase
-      .from('ai_knowledge_documents')
-      .insert({ account_id: accountId, created_by: userId, title, content })
-      .select('id')
-      .single()
-    if (error || !doc) {
+    let doc: { id: string }
+    try {
+      doc = await run((db) =>
+        insertKnowledgeDocument(db, {
+          account_id: accountId,
+          created_by: userId,
+          title,
+          content,
+        }),
+      )
+    } catch (error) {
       console.error('[ai/knowledge POST] insert error:', error)
       return NextResponse.json(
         { error: t('ai.knowledge.saveDocFailed') },
@@ -74,12 +85,12 @@ export async function POST(request: Request) {
     }
 
     const { key: embeddingsApiKey, corrupt } = await loadEmbeddingsKey(
-      supabase,
+      run,
       accountId,
     )
     try {
       await ingestDocument(
-        supabase,
+        run,
         accountId,
         { embeddingsApiKey },
         doc.id,

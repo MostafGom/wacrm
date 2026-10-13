@@ -11,6 +11,17 @@ import { embedTexts } from '@/lib/ai/embeddings'
 import { AiError, type AiProvider } from '@/lib/ai/types'
 import { normalizeOpenAiCompatibleBaseUrl } from '@/lib/ai/providers/openai-compatible'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { isUuid } from '@/server/http'
+import {
+  deleteAiConfig,
+  getAiConfigCredentials,
+  getAiConfigSummary,
+  insertAiConfig,
+  isAccountMember,
+  updateAiConfig,
+  type AiConfigWrite,
+} from '@/server/repos/ai-config'
 
 const t = getT('Api')
 
@@ -27,19 +38,14 @@ function bad(message: string) {
  */
 export async function GET() {
   try {
-    const { supabase, accountId } = await getCurrentAccount()
+    const { userId, accountId } = await getCurrentAccount()
 
-    const { data, error } = await supabase
-      .from('ai_configs')
-      // `api_key` is selected only to derive `has_key` — it is stripped
-      // out below and never returned to the client.
-      .select(
-        'provider, model, base_url, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
-      )
-      .eq('account_id', accountId)
-      .maybeSingle()
-
-    if (error) {
+    // The summary carries has_* flags derived in SQL — the encrypted
+    // keys themselves are never selected for this response.
+    let data: Awaited<ReturnType<typeof getAiConfigSummary>>
+    try {
+      data = await asUser(userId, (db) => getAiConfigSummary(db, accountId))
+    } catch (error) {
       console.error('[ai/config GET] fetch error:', error)
       return NextResponse.json(
         { error: t('ai.loadConfigFailed') },
@@ -48,13 +54,11 @@ export async function GET() {
     }
 
     if (!data) return NextResponse.json({ configured: false })
-    // The keys are selected only to derive the has_* flags; neither is
-    // returned to the client.
-    const { api_key, embeddings_api_key, ...safe } = data
+    const { has_key, has_embeddings_key, ...safe } = data
     return NextResponse.json({
       configured: true,
-      has_key: !!api_key,
-      has_embeddings_key: !!embeddings_api_key,
+      has_key,
+      has_embeddings_key,
       ...safe,
     })
   } catch (err) {
@@ -73,7 +77,7 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
 
     const limit = checkRateLimit(`ai-config:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
@@ -111,12 +115,11 @@ export async function POST(request: Request) {
     const handoffProvided = 'handoff_agent_id' in body
     let handoffAgentId: string | null = null
     if (rawHandoff) {
-      const { data: member } = await supabase
-        .from('profiles')
-        .select('user_id')
-        .eq('account_id', accountId)
-        .eq('user_id', rawHandoff)
-        .maybeSingle()
+      const member =
+        isUuid(rawHandoff) &&
+        (await asUser(userId, (db) =>
+          isAccountMember(db, accountId, rawHandoff),
+        ))
       if (!member) return bad(t('ai.handoffNotMember'))
       handoffAgentId = rawHandoff
     }
@@ -133,11 +136,9 @@ export async function POST(request: Request) {
     const clearEmbeddingsKey = body.embeddings_api_key === null
 
     // Reuse the stored key when the form didn't send a fresh one.
-    const { data: existing } = await supabase
-      .from('ai_configs')
-      .select('id, provider, model, base_url, api_key')
-      .eq('account_id', accountId)
-      .maybeSingle()
+    const existing = await asUser(userId, (db) =>
+      getAiConfigCredentials(db, accountId),
+    )
 
     let apiKeyPlain: string
     let baseUrl: string | null = null
@@ -222,7 +223,7 @@ export async function POST(request: Request) {
     }
 
     const encryptedKey = rawKey ? encrypt(rawKey) : null
-    const shared: Record<string, unknown> = {
+    const shared: AiConfigWrite = {
       provider,
       model,
       base_url: baseUrl,
@@ -241,11 +242,15 @@ export async function POST(request: Request) {
     }
 
     if (existing) {
-      const { error: upErr } = await supabase
-        .from('ai_configs')
-        .update(encryptedKey ? { ...shared, api_key: encryptedKey } : shared)
-        .eq('account_id', accountId)
-      if (upErr) {
+      try {
+        await asUser(userId, (db) =>
+          updateAiConfig(
+            db,
+            accountId,
+            encryptedKey ? { ...shared, api_key: encryptedKey } : shared,
+          ),
+        )
+      } catch (upErr) {
         console.error('[ai/config POST] update error:', upErr)
         return NextResponse.json(
           { error: t('ai.saveConfigFailed') },
@@ -253,13 +258,16 @@ export async function POST(request: Request) {
         )
       }
     } else {
-      const { error: insErr } = await supabase.from('ai_configs').insert({
-        account_id: accountId,
-        created_by: userId,
-        api_key: encryptedKey, // guaranteed non-null: rawKey required when no existing row
-        ...shared,
-      })
-      if (insErr) {
+      try {
+        await asUser(userId, (db) =>
+          insertAiConfig(db, {
+            account_id: accountId,
+            created_by: userId,
+            ...shared,
+            api_key: encryptedKey!, // guaranteed non-null: rawKey required when no existing row
+          }),
+        )
+      } catch (insErr) {
         console.error('[ai/config POST] insert error:', insErr)
         return NextResponse.json(
           { error: t('ai.saveConfigFailed') },
@@ -282,12 +290,10 @@ export async function POST(request: Request) {
  */
 export async function DELETE() {
   try {
-    const { supabase, accountId } = await requireRole('admin')
-    const { error } = await supabase
-      .from('ai_configs')
-      .delete()
-      .eq('account_id', accountId)
-    if (error) {
+    const { userId, accountId } = await requireRole('admin')
+    try {
+      await asUser(userId, (db) => deleteAiConfig(db, accountId))
+    } catch (error) {
       console.error('[ai/config DELETE] error:', error)
       return NextResponse.json(
         { error: t('ai.deleteConfigFailed') },

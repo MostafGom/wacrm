@@ -1,22 +1,20 @@
-import { describe, it, expect, vi } from 'vitest'
-import type { SupabaseClient } from '@/lib/db'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { Db, Runner } from '@/server/db'
 
 // decrypt is identity in tests so we don't depend on real ciphertext.
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: (v: string) => `plain:${v}`,
 }))
 
-import { loadAiConfig } from './config'
+const h = vi.hoisted(() => ({
+  getAiConfigSecrets: vi.fn(),
+  getEmbeddingsKeyCipher: vi.fn(),
+}))
+vi.mock('@/server/repos/ai-config', () => h)
 
-function dbReturning(row: Record<string, unknown> | null): SupabaseClient {
-  const chain = {
-    from: () => chain,
-    select: () => chain,
-    eq: () => chain,
-    maybeSingle: () => Promise.resolve({ data: row, error: null }),
-  }
-  return chain as unknown as SupabaseClient
-}
+import { loadAiConfig, loadEmbeddingsKey } from './config'
+
+const run: Runner = (fn) => fn({} as Db)
 
 const ROW = {
   provider: 'openai',
@@ -27,16 +25,22 @@ const ROW = {
   is_active: false,
   auto_reply_enabled: false,
   auto_reply_max_per_conversation: 3,
+  handoff_agent_id: null,
   embeddings_api_key: null,
 }
 
+beforeEach(() => {
+  h.getAiConfigSecrets.mockResolvedValue(ROW)
+})
+
 describe('loadAiConfig requireActive', () => {
   it('returns null for an inactive config by default', async () => {
-    expect(await loadAiConfig(dbReturning(ROW), 'acct')).toBeNull()
+    expect(await loadAiConfig(run, 'acct')).toBeNull()
+    expect(h.getAiConfigSecrets).toHaveBeenCalledWith({}, 'acct')
   })
 
   it('returns the config when requireActive is false (Playground path)', async () => {
-    const config = await loadAiConfig(dbReturning(ROW), 'acct', {
+    const config = await loadAiConfig(run, 'acct', {
       requireActive: false,
     })
     expect(config).not.toBeNull()
@@ -46,8 +50,26 @@ describe('loadAiConfig requireActive', () => {
   })
 
   it('returns null when there is no row', async () => {
+    h.getAiConfigSecrets.mockResolvedValue(undefined)
     expect(
-      await loadAiConfig(dbReturning(null), 'acct', { requireActive: false }),
+      await loadAiConfig(run, 'acct', { requireActive: false }),
     ).toBeNull()
+  })
+})
+
+describe('loadEmbeddingsKey', () => {
+  it('decrypts the stored key', async () => {
+    h.getEmbeddingsKeyCipher.mockResolvedValue('enc-emb')
+    expect(await loadEmbeddingsKey(run, 'acct')).toEqual({
+      key: 'plain:enc-emb',
+      corrupt: false,
+    })
+  })
+
+  it('returns no key (not corrupt) when unset or the read fails', async () => {
+    h.getEmbeddingsKeyCipher.mockResolvedValue(null)
+    expect(await loadEmbeddingsKey(run, 'acct')).toEqual({ key: null, corrupt: false })
+    h.getEmbeddingsKeyCipher.mockRejectedValue(new Error('db down'))
+    expect(await loadEmbeddingsKey(run, 'acct')).toEqual({ key: null, corrupt: false })
   })
 })

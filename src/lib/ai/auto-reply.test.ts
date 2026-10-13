@@ -30,39 +30,28 @@ vi.mock('@/lib/flows/meta-send', () => ({
 vi.mock('@/lib/whatsapp/meta-api', () => ({
   sendTypingIndicator: h.sendTypingIndicator,
 }))
-vi.mock('./admin-client', () => ({
-  supabaseAdmin: () => ({
-    from: (table: string) => {
-      if (table === 'automations') {
-        // .select().eq().eq().in().limit() → active auto-responders
-        const chain = {
-          select: () => chain,
-          eq: () => chain,
-          in: () => chain,
-          limit: () =>
-            Promise.resolve({ data: h.state.autoResponders, error: null }),
-        }
-        return chain
-      }
-      // conversations
-      return {
-        select: () => ({
-          eq: () => ({
-            maybeSingle: () =>
-              Promise.resolve({ data: h.state.conv, error: null }),
-          }),
-        }),
-        update: (payload: Record<string, unknown>) => {
-          h.state.updatePayload = payload
-          return { eq: () => Promise.resolve({ error: null }) }
-        },
-      }
-    },
-    rpc: (name: string, args: unknown) => {
-      h.state.rpcCalls.push({ name, args })
-      return Promise.resolve({ data: h.state.claim, error: null })
-    },
-  }),
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+vi.mock('@/server/repos/ai-usage', () => ({ insertAiUsageLog: async () => {} }))
+vi.mock('@/server/repos/ai-conversations', () => ({
+  // Active `new_message_received` / `keyword_match` automations.
+  hasActiveMessageAutoResponder: async () => h.state.autoResponders.length > 0,
+  getConversationAiState: async () => h.state.conv ?? undefined,
+  updateConversationAi: async (
+    _db: unknown,
+    _accountId: string,
+    _conversationId: string,
+    payload: Record<string, unknown>,
+  ) => {
+    h.state.updatePayload = payload
+    return 1
+  },
+  claimAiReplySlot: async (_db: unknown, conversationId: string, maxReplies: number) => {
+    h.state.rpcCalls.push({
+      name: 'claim_ai_reply_slot',
+      args: { conversation_id: conversationId, max_replies: maxReplies },
+    })
+    return h.state.claim
+  },
 }))
 
 import { dispatchInboundToAiReply } from './auto-reply'
