@@ -1,8 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { createClient } from "@/lib/supabase/client";
 import type { Pipeline, PipelineStage, Deal } from "@/types";
+import {
+  createPipeline,
+  listDeals,
+  listPipelines,
+  listStages,
+  updateDeal,
+} from "@/lib/pipelines/pipelines-api";
 import { PipelineBoard } from "@/components/pipelines/pipeline-board";
 import { PipelineSettings } from "@/components/pipelines/pipeline-settings";
 import { DealForm } from "@/components/pipelines/deal-form";
@@ -50,7 +56,6 @@ const SPEC_DEFAULT_STAGES = [
 export default function PipelinesPage() {
   const t = useTranslations("Pipelines.page");
   const tGate = useTranslations("GatedButton");
-  const supabase = createClient();
   const canEditSettings = useCan("edit-settings");
   const canCreateDeals = useCan("send-messages");
   const { accountId } = useAuth();
@@ -76,72 +81,48 @@ export default function PipelinesPage() {
   // Guard against double-seeding (React StrictMode double-effect in dev).
   const seedAttempted = useRef(false);
 
-  const loadPipelines = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("pipelines")
-      .select("*")
-      .order("created_at");
+  const loadPipelines = useCallback(async (): Promise<Pipeline[]> => {
+    const { data, error } = await listPipelines();
     if (error) {
       console.error("Failed to load pipelines:", error.message);
       return [];
     }
-    return data ?? [];
-  }, [supabase]);
+    return data.pipelines;
+  }, []);
 
-  const loadStages = useCallback(
-    async (pipelineId: string) => {
-      const { data } = await supabase
-        .from("pipeline_stages")
-        .select("*")
-        .eq("pipeline_id", pipelineId)
-        .order("position");
-      return data ?? [];
-    },
-    [supabase],
-  );
+  const loadStages = useCallback(async (pipelineId: string): Promise<PipelineStage[]> => {
+    const { data } = await listStages(pipelineId);
+    return data?.stages ?? [];
+  }, []);
 
-  const loadDeals = useCallback(
-    async (pipelineId: string) => {
-      const { data } = await supabase
-        .from("deals")
-        .select("*, contact:contacts(*), assignee:profiles!deals_assigned_to_fkey(*)")
-        .eq("pipeline_id", pipelineId)
-        .order("created_at", { ascending: false });
-      return (data ?? []) as Deal[];
-    },
-    [supabase],
+  const loadDeals = useCallback(async (pipelineId: string): Promise<Deal[]> => {
+    const { data } = await listDeals(pipelineId);
+    return data?.deals ?? [];
+  }, []);
+
+  // The spec's default stages, named in the UI language.
+  const defaultStagesPayload = useCallback(
+    () =>
+      SPEC_DEFAULT_STAGES.map((s) => ({
+        name: t(`defaultStages.${s.nameKey}`),
+        color: s.color,
+        position: s.position,
+      })),
+    [t],
   );
 
   const seedDefaultPipeline = useCallback(async (): Promise<Pipeline | null> => {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    const user = session?.user;
-    if (!user) return null;
     // pipelines.account_id is NOT NULL post-017 with no DB default.
     if (!accountId) return null;
 
-    const { data: pipeline, error } = await supabase
-      .from("pipelines")
-      .insert({ user_id: user.id, account_id: accountId, name: t("defaultPipelineName") })
-      .select()
-      .single();
-
-    if (error || !pipeline) {
-      console.error("Failed to seed pipeline:", error?.message);
+    // The pipeline and its stages commit together server-side.
+    const { data, error } = await createPipeline(t("defaultPipelineName"), defaultStagesPayload());
+    if (error) {
+      console.error("Failed to seed pipeline:", error.message);
       return null;
     }
-
-    const stagesPayload = SPEC_DEFAULT_STAGES.map((s) => ({
-      pipeline_id: pipeline.id,
-      name: t(`defaultStages.${s.nameKey}`),
-      color: s.color,
-      position: s.position,
-    }));
-    await supabase.from("pipeline_stages").insert(stagesPayload);
-
-    return pipeline as Pipeline;
-  }, [supabase, accountId, t]);
+    return data.pipeline;
+  }, [accountId, t, defaultStagesPayload]);
 
   // Initial load + seed-if-empty
   useEffect(() => {
@@ -223,16 +204,13 @@ export default function PipelinesPage() {
       setDeals((prev) =>
         prev.map((d) => (d.id === dealId ? { ...d, stage_id: newStageId } : d)),
       );
-      const { error } = await supabase
-        .from("deals")
-        .update({ stage_id: newStageId })
-        .eq("id", dealId);
+      const { error } = await updateDeal(dealId, { stage_id: newStageId });
       if (error) {
         toast.error(t("toastFailedMoveDeal"));
         refreshDeals();
       }
     },
-    [supabase, refreshDeals, t],
+    [refreshDeals, t],
   );
 
   const handleAddDeal = useCallback(
@@ -255,14 +233,6 @@ export default function PipelinesPage() {
     if (!name) return;
     setCreating(true);
 
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    const user = session?.user;
-    if (!user) {
-      setCreating(false);
-      return;
-    }
     // pipelines.account_id is NOT NULL post-017 with no DB default.
     if (!accountId) {
       toast.error(t("toastNotLinkedToAccount"));
@@ -270,25 +240,15 @@ export default function PipelinesPage() {
       return;
     }
 
-    const { data: pipeline, error } = await supabase
-      .from("pipelines")
-      .insert({ user_id: user.id, account_id: accountId, name })
-      .select()
-      .single();
+    // One request: the pipeline and its default stages commit together.
+    const { data, error } = await createPipeline(name, defaultStagesPayload());
 
-    if (error || !pipeline) {
+    if (error) {
       toast.error(t("toastFailedCreatePipeline"));
       setCreating(false);
       return;
     }
-
-    const stagesPayload = SPEC_DEFAULT_STAGES.map((s) => ({
-      pipeline_id: pipeline.id,
-      name: t(`defaultStages.${s.nameKey}`),
-      color: s.color,
-      position: s.position,
-    }));
-    await supabase.from("pipeline_stages").insert(stagesPayload);
+    const pipeline = data.pipeline;
 
     setNewPipelineName("");
     setNewPipelineOpen(false);
