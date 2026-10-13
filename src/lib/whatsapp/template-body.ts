@@ -79,31 +79,23 @@ export interface ResolvedTemplate {
 }
 
 /**
- * Look up the `message_templates` row for a send, tolerant of the
- * `en` / `en_US` split.
+ * Pick the `message_templates` row for a send from the account's rows
+ * with that name, tolerant of the `en` / `en_US` split.
  *
  * The old lookup was `.eq('language', requested || 'en_US')`. Templates
  * synced from Meta commonly carry the bare `en`, so a caller that
  * omitted the language matched no row: no header components, and no
  * body to persist. Matching falls back through
  * exact → same base language → a sensible default.
+ *
+ * Pure: load the candidates with `listTemplatesByName`
+ * (src/server/repos/templates.ts).
  */
-export async function resolveTemplateRow(
-  db: SupabaseClient,
-  accountId: string,
-  templateName: string,
+export function pickTemplateRow(
+  candidates: unknown[],
   requestedLanguage?: string | null
-): Promise<ResolvedTemplate> {
-  const { data } = await db
-    .from('message_templates')
-    .select('*')
-    .eq('account_id', accountId)
-    .eq('name', templateName);
-
-  // Sorted here rather than with `.order()` so the only query-builder
-  // surface this helper depends on is select + eq — the same shape the
-  // callers' existing fakes implement.
-  const rows = ((Array.isArray(data) ? data : []) as { language?: string }[])
+): ResolvedTemplate {
+  const rows = (candidates as { language?: string }[])
     .slice()
     .sort((a, b) => (a.language ?? '').localeCompare(b.language ?? ''));
   const fallbackLanguage = requestedLanguage || 'en_US';
@@ -148,6 +140,24 @@ export async function resolveTemplateRow(
     malformed: false,
     language: requestedLanguage || chosen.language || 'en_US',
   };
+}
+
+/**
+ * @deprecated Transitional: loads candidates through the supabase-shaped
+ * client. Use `listTemplatesByName` + `pickTemplateRow`.
+ */
+export async function resolveTemplateRow(
+  db: SupabaseClient,
+  accountId: string,
+  templateName: string,
+  requestedLanguage?: string | null
+): Promise<ResolvedTemplate> {
+  const { data } = await db
+    .from('message_templates')
+    .select('*')
+    .eq('account_id', accountId)
+    .eq('name', templateName);
+  return pickTemplateRow(Array.isArray(data) ? data : [], requestedLanguage);
 }
 
 /**
