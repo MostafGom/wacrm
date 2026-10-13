@@ -1,157 +1,154 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// Shared mock state for the service-role client. Lives in a hoisted block
-// so the vi.mock factory below can close over it.
-const h = vi.hoisted(() => ({
-  state: {
+// The engine talks to the database only through repository modules, run
+// under asService. Those modules are replaced by an in-memory fake that
+// applies the same predicates the SQL does (account scoping, status
+// gates, branch scopes), so the regressions below assert on what the
+// engine actually asked the database to do.
+const h = vi.hoisted(() => {
+  const state = {
     owned: null as { id: string } | null,
     ownedCustomField: null as { id: string } | null,
-    /** Row the account-scoped `conversations` lookup resolves. */
+    /** Conversation the account-scoped lookups resolve. */
     ownedConversation: null as { id: string } | null,
     automations: [] as Record<string, unknown>[],
     steps: [] as Record<string, unknown>[],
-    fromCalls: [] as string[],
-    updateCalls: [] as { table: string; filters: [string, string, unknown][] }[],
-    upsertCalls: [] as { table: string; payload: unknown }[],
+    /** Contact-column writes: [accountId, contactId, field, value]. */
+    contactUpdates: [] as unknown[][],
+    upsertCalls: [] as { contact_id: string; custom_field_id: string; value: string }[],
     logInserts: [] as Record<string, unknown>[],
+    /** Each log patch, minus appended steps (status / error_message). */
     logUpdates: [] as Record<string, unknown>[],
     // automation_pending_executions rows, mutated in place by updates.
     pending: [] as Record<string, unknown>[],
-  },
-}));
+  };
 
-vi.mock("./admin-client", () => {
-  const { state } = h;
+  const byPosition = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    (a.position as number) - (b.position as number);
 
-  type Filter = [string, string, unknown];
+  const automations = {
+    getAutomation: vi.fn(async (_db: unknown, accountId: string, id: string) =>
+      state.automations.find((a) => a.id === id && a.account_id === accountId),
+    ),
+    listActiveAutomationsForTrigger: vi.fn(async (_db: unknown, accountId: string, triggerType: string) =>
+      state.automations.filter(
+        (a) => a.account_id === accountId && a.trigger_type === triggerType && a.is_active,
+      ),
+    ),
+    listScopeSteps: vi.fn(
+      async (
+        _db: unknown,
+        automationId: string,
+        scope: { parentStepId: string | null; branch: string | null; startPosition: number },
+      ) =>
+        state.steps
+          .filter(
+            (s) =>
+              s.automation_id === automationId &&
+              (s.position as number) >= scope.startPosition &&
+              (scope.parentStepId === null
+                ? (s.parent_step_id ?? null) === null
+                : s.parent_step_id === scope.parentStepId && s.branch === (scope.branch ?? "yes")),
+          )
+          .sort(byPosition),
+    ),
+    getStepPlacement: vi.fn(async (_db: unknown, automationId: string, stepId: string) => {
+      const s = state.steps.find((x) => x.id === stepId && x.automation_id === automationId);
+      return s
+        ? { id: s.id, parent_step_id: s.parent_step_id ?? null, branch: s.branch ?? null, position: s.position }
+        : undefined;
+    }),
+    incrementAutomationExecutionCount: vi.fn(async () => {}),
+  };
 
-  // Applies the recorded filters to an in-memory row, so scoped reads
-  // (branch children, a contact's parked run) behave like the real query.
-  function matches(row: Record<string, unknown>, filters: Filter[]) {
-    return filters.every(([op, k, v]) => {
-      const cell = row[k] ?? null;
-      if (op === "eq") return cell === v;
-      if (op === "is") return cell === v;
-      if (op === "gte") return (cell as number | string) >= (v as number | string);
-      if (op === "gt") return (cell as number | string) > (v as number | string);
-      if (op === "lte") return (cell as number | string) <= (v as number | string);
-      return true;
-    });
-  }
-
-  function resolve(ops: {
-    table: string;
-    type: string;
-    payload?: unknown;
-    filters: Filter[];
-    single: boolean;
-  }) {
-    const { table, type } = ops;
-    const one = <T,>(rows: T[]) => (ops.single ? rows[0] ?? null : rows);
-    if (table === "automation_pending_executions") {
-      if (type === "insert") {
-        const row = {
-          id: `p${state.pending.length + 1}`,
-          created_at: new Date(Date.now() + state.pending.length).toISOString(),
-          ...(ops.payload as Record<string, unknown>),
-        };
-        state.pending.push(row);
-        return { data: row, error: null };
-      }
-      const hit = state.pending.filter((r) => matches(r, ops.filters));
-      if (type === "update") {
-        hit.forEach((r) => Object.assign(r, ops.payload as Record<string, unknown>));
-      }
-      return { data: one(hit), error: null };
-    }
-    if (table === "contacts") {
-      if (type === "update") {
-        state.updateCalls.push({ table, filters: ops.filters });
-        return { data: null, error: null };
-      }
-      // ownership guard / condition read
-      return { data: state.owned, error: null };
-    }
-    if (table === "conversations") {
-      return { data: state.ownedConversation, error: null };
-    }
-    if (table === "custom_fields") {
-      // account-scoped ownership lookup for a custom field definition
-      return { data: state.ownedCustomField, error: null };
-    }
-    if (table === "contact_custom_values") {
-      if (type === "upsert") {
-        state.upsertCalls.push({ table, payload: ops.payload });
-        return { data: null, error: null };
-      }
-      return { data: null, error: null };
-    }
-    if (table === "automations") {
-      // The dispatch list query (no id filter) keeps returning every row,
-      // as it always has; a by-id lookup (resume) gets the matching row.
-      const byId = ops.filters.some(([, k]) => k === "id");
-      if (!byId) return { data: state.automations, error: null };
-      return { data: one(state.automations.filter((r) => matches(r, ops.filters))), error: null };
-    }
-    if (table === "automation_logs") {
-      if (type === "insert") {
-        state.logInserts.push(ops.payload as Record<string, unknown>);
-        return { data: { id: "log1" }, error: null };
-      }
-      if (type === "update") {
-        state.logUpdates.push(ops.payload as Record<string, unknown>);
-        return { data: null, error: null };
-      }
-      return { data: { steps_executed: [], status: "success" }, error: null };
-    }
-    if (table === "automation_steps") {
-      const rows = state.steps
-        .filter((r) => matches(r, ops.filters))
-        .sort((a, b) => (a.position as number) - (b.position as number));
-      return { data: one(rows), error: null };
-    }
-    return { data: null, error: null };
-  }
-
-  function builder(table: string) {
-    const ops = {
-      table,
-      type: "select",
-      payload: undefined as unknown,
-      filters: [] as [string, string, unknown][],
-      single: false,
-    };
-    const b: Record<string, unknown> = {
-      select: () => b,
-      insert: (p: unknown) => ((ops.type = "insert"), (ops.payload = p), b),
-      update: (p: unknown) => ((ops.type = "update"), (ops.payload = p), b),
-      delete: () => ((ops.type = "delete"), b),
-      upsert: (p: unknown) => ((ops.type = "upsert"), (ops.payload = p), b),
-      eq: (k: string, v: unknown) => (ops.filters.push(["eq", k, v]), b),
-      is: (k: string, v: unknown) => (ops.filters.push(["is", k, v]), b),
-      gte: (k: string, v: unknown) => (ops.filters.push(["gte", k, v]), b),
-      gt: (k: string, v: unknown) => (ops.filters.push(["gt", k, v]), b),
-      lte: (k: string, v: unknown) => (ops.filters.push(["lte", k, v]), b),
-      order: () => b,
-      limit: () => b,
-      single: () => ((ops.single = true), Promise.resolve(resolve(ops))),
-      maybeSingle: () => ((ops.single = true), Promise.resolve(resolve(ops))),
-      then: (onF: (v: unknown) => unknown, onR?: (e: unknown) => unknown) =>
-        Promise.resolve(resolve(ops)).then(onF, onR),
-    };
-    return b;
-  }
-
-  return {
-    supabaseAdmin: () => ({
-      from: (t: string) => {
-        state.fromCalls.push(t);
-        return builder(t);
+  const runs = {
+    insertAutomationLog: vi.fn(async (_db: unknown, values: Record<string, unknown>) => {
+      state.logInserts.push({ ...values, steps_executed: [] });
+      return { id: "log1" };
+    }),
+    updateAutomationLog: vi.fn(
+      async (_db: unknown, _accountId: string, _logId: string, patch: Record<string, unknown>) => {
+        const { appendSteps: _appended, ...rest } = patch;
+        void _appended;
+        state.logUpdates.push(rest);
       },
-      rpc: () => Promise.resolve({ error: null }),
+    ),
+    insertPendingExecution: vi.fn(async (_db: unknown, values: Record<string, unknown>) => {
+      const row = {
+        id: `p${state.pending.length + 1}`,
+        created_at: new Date(Date.now() + state.pending.length).toISOString(),
+        ...values,
+      };
+      state.pending.push(row);
+      return { id: row.id };
+    }),
+    supersedeAwaitingReplies: vi.fn(async (_db: unknown, accountId: string, contactId: string | null) => {
+      for (const p of state.pending) {
+        if (p.account_id === accountId && p.contact_id === contactId && p.status === "awaiting_reply") {
+          p.status = "superseded";
+        }
+      }
+    }),
+    findAwaitingReply: vi.fn(async (_db: unknown, accountId: string, contactId: string, now: Date) =>
+      state.pending
+        .filter(
+          (p) =>
+            p.account_id === accountId &&
+            p.contact_id === contactId &&
+            p.status === "awaiting_reply" &&
+            (p.run_at as string) > now.toISOString(),
+        )
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0],
+    ),
+    claimPendingExecution: vi.fn(async (_db: unknown, id: string, from: string) => {
+      const p = state.pending.find((x) => x.id === id && x.status === from);
+      if (!p) return false;
+      p.status = "running";
+      return true;
+    }),
+    setPendingExecutionStatus: vi.fn(async (_db: unknown, accountId: string, id: string, status: string) => {
+      const p = state.pending.find((x) => x.id === id && x.account_id === accountId);
+      if (p) p.status = status;
+    }),
+    expireAwaitingReplyRows: vi.fn(async (_db: unknown, now: Date) => {
+      const hit = state.pending.filter(
+        (p) => p.status === "awaiting_reply" && (p.run_at as string) <= now.toISOString(),
+      );
+      hit.forEach((p) => (p.status = "expired"));
+      return hit.map((p) => ({ id: p.id, account_id: p.account_id, log_id: p.log_id ?? null }));
     }),
   };
+
+  const data = {
+    contactInAccount: vi.fn(async () => Boolean(state.owned)),
+    conversationInAccount: vi.fn(async () => Boolean(state.ownedConversation)),
+    findConversationIdForContact: vi.fn(async () => state.ownedConversation?.id ?? null),
+    customFieldInAccount: vi.fn(async () => Boolean(state.ownedCustomField)),
+    getContactFieldValue: vi.fn(async () => undefined),
+    contactHasTag: vi.fn(async () => false),
+    deleteContactTag: vi.fn(async () => {}),
+    updateContactField: vi.fn(async (...args: unknown[]) => {
+      state.contactUpdates.push(args.slice(1));
+    }),
+    upsertContactCustomValue: vi.fn(
+      async (_db: unknown, _accountId: string, contactId: string, customFieldId: string, value: string) => {
+        state.upsertCalls.push({ contact_id: contactId, custom_field_id: customFieldId, value });
+      },
+    ),
+    assignContactConversations: vi.fn(async () => {}),
+    closeContactConversations: vi.fn(async () => {}),
+    firstAccountMemberUserId: vi.fn(async () => null),
+    getAccountDefaultCurrency: vi.fn(async () => "USD"),
+    insertDeal: vi.fn(async () => {}),
+  };
+
+  return { state, automations, runs, data };
 });
+
+vi.mock("@/server/db", async () => (await import("@/test/auth-mocks")).dbModule());
+vi.mock("@/server/repos/automations", () => h.automations);
+vi.mock("@/server/repos/automation-runs", () => h.runs);
+vi.mock("@/server/repos/engine-data", () => h.data);
 
 vi.mock("./meta-send", () => ({
   engineSendText: vi.fn(async () => ({ whatsapp_message_id: "m1" })),
@@ -176,8 +173,7 @@ beforeEach(() => {
   h.state.ownedConversation = null;
   h.state.automations = [];
   h.state.steps = [];
-  h.state.fromCalls = [];
-  h.state.updateCalls = [];
+  h.state.contactUpdates = [];
   h.state.upsertCalls = [];
   h.state.logInserts = [];
   h.state.logUpdates = [];
@@ -201,9 +197,9 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
     });
 
     // Bailed at the guard: never fetched automations, never wrote a contact.
-    expect(h.state.fromCalls).toContain("contacts");
-    expect(h.state.fromCalls).not.toContain("automations");
-    expect(h.state.updateCalls).toHaveLength(0);
+    expect(h.data.contactInAccount).toHaveBeenCalledWith(expect.anything(), ACCOUNT, "victim-contact-uuid");
+    expect(h.automations.listActiveAutomationsForTrigger).not.toHaveBeenCalled();
+    expect(h.state.contactUpdates).toHaveLength(0);
   });
 
   it("proceeds past the guard when the contact belongs to the account", async () => {
@@ -217,7 +213,7 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
       context: {},
     });
 
-    expect(h.state.fromCalls).toContain("automations");
+    expect(h.automations.listActiveAutomationsForTrigger).toHaveBeenCalled();
   });
 
   it("refuses a caller-supplied conversation_id from another account (GHSA-m4fx-g6pr-hrw8)", async () => {
@@ -237,9 +233,13 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
       context: { conversation_id: "victim-conversation-uuid" },
     });
 
-    expect(h.state.fromCalls).toContain("conversations");
-    expect(h.state.fromCalls).not.toContain("automations");
-    expect(h.state.updateCalls).toHaveLength(0);
+    expect(h.data.conversationInAccount).toHaveBeenCalledWith(
+      expect.anything(),
+      ACCOUNT,
+      "victim-conversation-uuid",
+    );
+    expect(h.automations.listActiveAutomationsForTrigger).not.toHaveBeenCalled();
+    expect(h.state.contactUpdates).toHaveLength(0);
   });
 
   it("proceeds when the conversation belongs to the account", async () => {
@@ -254,7 +254,7 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
       context: { conversation_id: "conv-1" },
     });
 
-    expect(h.state.fromCalls).toContain("automations");
+    expect(h.automations.listActiveAutomationsForTrigger).toHaveBeenCalled();
   });
 
   it("scopes the update_contact_field write to the automation's account", async () => {
@@ -269,10 +269,8 @@ describe("runAutomationsForTrigger — tenant isolation", () => {
       context: {},
     });
 
-    expect(h.state.updateCalls).toHaveLength(1);
-    const filters = h.state.updateCalls[0].filters;
-    expect(filters).toContainEqual(["eq", "id", "c1"]);
-    expect(filters).toContainEqual(["eq", "account_id", ACCOUNT]);
+    // The write is keyed on both the contact and the automation's account.
+    expect(h.state.contactUpdates).toEqual([[ACCOUNT, "c1", "company", "pwned-by-automation"]]);
   });
 });
 
@@ -332,9 +330,9 @@ describe("update_contact_field — custom fields", () => {
     });
 
     // No direct contacts column write for a custom field.
-    expect(h.state.updateCalls).toHaveLength(0);
+    expect(h.state.contactUpdates).toHaveLength(0);
     expect(h.state.upsertCalls).toHaveLength(1);
-    expect(h.state.upsertCalls[0].payload).toEqual({
+    expect(h.state.upsertCalls[0]).toEqual({
       contact_id: "c1",
       custom_field_id: "cf1",
       value: "Premium",
@@ -355,9 +353,7 @@ describe("update_contact_field — custom fields", () => {
     });
 
     expect(h.state.upsertCalls).toHaveLength(1);
-    expect(
-      (h.state.upsertCalls[0].payload as { value: string }).value,
-    ).toBe("WhatsApp Ad");
+    expect(h.state.upsertCalls[0].value).toBe("WhatsApp Ad");
   });
 
   it("refuses to write a custom field from another account", async () => {
@@ -374,7 +370,7 @@ describe("update_contact_field — custom fields", () => {
     });
 
     expect(h.state.upsertCalls).toHaveLength(0);
-    expect(h.state.updateCalls).toHaveLength(0);
+    expect(h.state.contactUpdates).toHaveLength(0);
   });
 });
 
@@ -397,7 +393,7 @@ describe("send_webhook — SSRF guard (GHSA-8jqh-598v-rfxc)", () => {
 
     // The automation matched and its steps were loaded (so we genuinely
     // reached the send_webhook case)...
-    expect(h.state.fromCalls).toContain("automation_steps");
+    expect(h.automations.listScopeSteps).toHaveBeenCalled();
     // ...yet the guard blocked it before any outbound request left the box.
     expect(fetchSpy).not.toHaveBeenCalled();
 

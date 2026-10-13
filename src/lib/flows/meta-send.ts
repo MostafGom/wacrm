@@ -15,8 +15,8 @@ import {
 } from '@/lib/whatsapp/phone-utils'
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
 import { assertConversationInAccount } from '@/lib/whatsapp/conversation-scope'
-import { supabaseAdmin } from './admin-client'
 import { asService } from '@/server/db'
+import { getSendContact, recordBotMessage, updateContactPhone, type BotMessageInput } from '@/server/repos/engine-data'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
@@ -94,21 +94,11 @@ interface SendTextEngineArgs {
 export async function engineSendText(
   args: SendTextEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
-
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
-  if (contactErr || !contact) {
-    throw new Error(t('send.contactNotFound'))
-  }
+  const contact = await loadSendContact(args.accountId, args.contactId)
 
   // Same for the conversation the message lands in — see
   // conversation-scope.ts (GHSA-m4fx-g6pr-hrw8).
-  await assertConversationInAccount(db, args.conversationId, args.accountId)
+  await assertConversationInAccount(args.conversationId, args.accountId)
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
@@ -153,31 +143,17 @@ export async function engineSendText(
   if (lastError) throw lastError
 
   if (sendTarget.isPhone && workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await rememberWorkingPhone(args.accountId, contact.id, workingPhone)
   }
 
-  const { error: msgErr } = await db.from('messages').insert({
-    conversation_id: args.conversationId,
-    sender_type: 'bot',
-    content_type: 'text',
-    content_text: args.text,
-    message_id: waMessageId,
-    status: 'sent',
-    ai_generated: args.aiGenerated ?? false,
+  await persistBotMessage(args.accountId, {
+    conversationId: args.conversationId,
+    contentType: 'text',
+    contentText: args.text,
+    waMessageId,
+    aiGenerated: args.aiGenerated ?? false,
+    preview: args.text,
   })
-  if (msgErr) {
-    throw new Error(t('send.dbInsertFailed', { message: msgErr.message }))
-  }
-
-  await db
-    .from('conversations')
-    .update({
-      last_message_text: args.text,
-      last_message_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', args.conversationId)
-    .eq('account_id', args.accountId)
 
   return { whatsapp_message_id: waMessageId }
 }
@@ -207,21 +183,11 @@ interface SendMediaEngineArgs {
 export async function engineSendMedia(
   args: SendMediaEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
-
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
-  if (contactErr || !contact) {
-    throw new Error(t('send.contactNotFound'))
-  }
+  const contact = await loadSendContact(args.accountId, args.contactId)
 
   // Same for the conversation the message lands in — see
   // conversation-scope.ts (GHSA-m4fx-g6pr-hrw8).
-  await assertConversationInAccount(db, args.conversationId, args.accountId)
+  await assertConversationInAccount(args.conversationId, args.accountId)
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
@@ -269,7 +235,7 @@ export async function engineSendMedia(
   if (lastError) throw lastError
 
   if (sendTarget.isPhone && workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await rememberWorkingPhone(args.accountId, contact.id, workingPhone)
   }
 
   // content_type='image'|'video'|'document' — these are already in the
@@ -277,27 +243,13 @@ export async function engineSendMedia(
   // content_text carries the caption (or empty) so the conversation
   // list preview shows something meaningful when the user glances at it.
   const preview = args.caption?.trim() || `[${args.kind}]`
-  const { error: msgErr } = await db.from('messages').insert({
-    conversation_id: args.conversationId,
-    sender_type: 'bot',
-    content_type: args.kind,
-    content_text: args.caption ?? null,
-    message_id: waMessageId,
-    status: 'sent',
+  await persistBotMessage(args.accountId, {
+    conversationId: args.conversationId,
+    contentType: args.kind,
+    contentText: args.caption ?? null,
+    waMessageId,
+    preview,
   })
-  if (msgErr) {
-    throw new Error(t('send.dbInsertFailed', { message: msgErr.message }))
-  }
-
-  await db
-    .from('conversations')
-    .update({
-      last_message_text: preview,
-      last_message_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', args.conversationId)
-    .eq('account_id', args.accountId)
 
   return { whatsapp_message_id: waMessageId }
 }
@@ -359,24 +311,14 @@ type SendInput =
 async function sendInteractiveViaMeta(
   input: SendInput,
 ): Promise<{ whatsapp_message_id: string }> {
-  const db = supabaseAdmin()
-
   // Scope the contact + whatsapp_config lookups by account_id —
   // same defense-in-depth rationale as automations/meta-send.ts.
   // Migration 017 moved both tables to account-scoped tenancy.
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', input.contactId)
-    .eq('account_id', input.accountId)
-    .maybeSingle()
-  if (contactErr || !contact) {
-    throw new Error(t('send.contactNotFound'))
-  }
+  const contact = await loadSendContact(input.accountId, input.contactId)
 
   // Same for the conversation the message lands in — see
   // conversation-scope.ts (GHSA-m4fx-g6pr-hrw8).
-  await assertConversationInAccount(db, input.conversationId, input.accountId)
+  await assertConversationInAccount(input.conversationId, input.accountId)
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
@@ -440,7 +382,7 @@ async function sendInteractiveViaMeta(
   if (lastError) throw lastError
 
   if (sendTarget.isPhone && workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    await rememberWorkingPhone(input.accountId, contact.id, workingPhone)
   }
 
   // Persist the bot's prompt to the messages table so it appears in
@@ -472,28 +414,54 @@ async function sendInteractiveViaMeta(
           sections: input.sections,
         }
 
-  const { error: msgErr } = await db.from('messages').insert({
-    conversation_id: input.conversationId,
-    sender_type: 'bot',
-    content_type: 'interactive',
-    content_text: input.bodyText,
-    interactive_payload: interactivePayload,
-    message_id: waMessageId,
-    status: 'sent',
+  await persistBotMessage(input.accountId, {
+    conversationId: input.conversationId,
+    contentType: 'interactive',
+    contentText: input.bodyText,
+    interactivePayload,
+    waMessageId,
+    preview: input.bodyText,
   })
-  if (msgErr) {
-    throw new Error(t('send.dbInsertFailed', { message: msgErr.message }))
-  }
-
-  await db
-    .from('conversations')
-    .update({
-      last_message_text: input.bodyText,
-      last_message_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', input.conversationId)
-    .eq('account_id', input.accountId)
 
   return { whatsapp_message_id: waMessageId }
+}
+
+// ------------------------------------------------------------
+// DB steps shared by the senders. Each is its own short service-role
+// transaction, run before or after the Meta call — never around it.
+// ------------------------------------------------------------
+
+/** The contact to address, scoped to the account (throws when absent). */
+async function loadSendContact(accountId: string, contactId: string) {
+  const contact = await asService((db) => getSendContact(db, accountId, contactId)).catch(() => undefined)
+  if (!contact) {
+    throw new Error(t('send.contactNotFound'))
+  }
+  return contact
+}
+
+/** Remember which phone variant Meta accepted. Best-effort. */
+async function rememberWorkingPhone(accountId: string, contactId: string, phone: string) {
+  try {
+    await asService((db) => updateContactPhone(db, accountId, contactId, phone))
+  } catch (err) {
+    console.error('[flows] phone variant update failed:', err)
+  }
+}
+
+/**
+ * Persist the message Meta already accepted and bump the conversation
+ * preview. Meta has the message either way, so a failure here surfaces
+ * as a DB error rather than pretending the send failed.
+ */
+async function persistBotMessage(accountId: string, input: BotMessageInput) {
+  let recorded: boolean
+  try {
+    recorded = await asService((db) => recordBotMessage(db, accountId, input))
+  } catch (err) {
+    throw new Error(t('send.dbInsertFailed', { message: err instanceof Error ? err.message : String(err) }))
+  }
+  if (!recorded) {
+    throw new Error(t('send.dbInsertFailed', { message: t('send.conversationNotFound') }))
+  }
 }

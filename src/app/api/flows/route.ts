@@ -1,182 +1,110 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
-import { requireRole, toErrorResponse } from '@/lib/auth/account'
-import { supabaseAdmin } from '@/lib/flows/admin-client'
+import { HttpError, requireRole, toErrorResponse } from '@/lib/auth/account'
 import { getFlowTemplate } from '@/lib/flows/templates'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { readJsonBody } from '@/server/http'
+import { insertFlow, insertFlowNodes, listFlows } from '@/server/repos/flows'
 
 const t = getT('Api')
 
 /**
- * GET /api/flows — list the caller's flows.
- * POST /api/flows — create a new (draft) flow.
+ * GET /api/flows — list the account's flows (any member).
+ * POST /api/flows — create a new (draft) flow (agent+).
  *
- * Available to every authenticated user. The previous per-account
- * beta gate was removed when Flows went to soft-GA; the UI still
- * shows a "Beta" label so users know the surface is young, but the
- * routes themselves are open.
+ * The previous per-account beta gate was removed when Flows went to
+ * soft-GA; the UI still shows a "Beta" label so users know the surface
+ * is young, but the routes themselves are open.
  */
 
-async function requireUser(): Promise<
-  | { ok: true; userId: string; supabase: Awaited<ReturnType<typeof createClient>> }
-  | { ok: false; status: number; body: { error: string } }
-> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return { ok: false, status: 401, body: { error: t('common.unauthorized') } }
-  }
-  return { ok: true, userId: user.id, supabase }
-}
-
 export async function GET() {
-  const guard = await requireUser()
-  if (!guard.ok) {
-    return NextResponse.json(guard.body, { status: guard.status })
-  }
-  const { supabase } = guard
-
-  const { data, error } = await supabase
-    .from('flows')
-    .select('*')
-    .order('created_at', { ascending: false })
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-  return NextResponse.json({ flows: data ?? [] })
-}
-
-export async function POST(request: Request) {
-  // Creating a flow is a write — the RLS flows_insert policy requires
-  // `agent`, but this route inserts via the service-role client which
-  // bypasses RLS, so the role must be enforced here.
   try {
-    await requireRole('agent')
+    const ctx = await requireRole('viewer')
+    const flows = await asUser(ctx.userId, (db) => listFlows(db, ctx.accountId))
+    return NextResponse.json({ flows })
   } catch (err) {
     return toErrorResponse(err)
   }
+}
 
-  const guard = await requireUser()
-  if (!guard.ok) {
-    return NextResponse.json(guard.body, { status: guard.status })
-  }
-  const { userId, supabase } = guard
+export async function POST(request: Request) {
+  try {
+    // Creating a flow is a write — the RLS flows_insert policy requires
+    // `agent`.
+    const ctx = await requireRole('agent')
 
-  // Resolve the caller's account_id — `flows.account_id` is NOT NULL
-  // post-017, so an INSERT without it trips the not-null constraint
-  // even though the admin client below bypasses RLS.
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('account_id')
-    .eq('user_id', userId)
-    .single()
-  const accountId = profile?.account_id as string | undefined
-  if (!accountId) {
-    return NextResponse.json(
-      { error: t('common.profileNotLinked') },
-      { status: 403 },
-    )
-  }
+    const body = (await readJsonBody(request)) as {
+      name?: string
+      description?: string | null
+      trigger_type?: 'keyword' | 'first_inbound_message' | 'manual'
+      trigger_config?: Record<string, unknown>
+      /**
+       * If set, clone the matching template's name + trigger +
+       * entry_node_id + nodes[] into a fresh draft for this user.
+       * `name` from the body overrides the template default if
+       * provided.
+       */
+      template_slug?: string
+    }
+    if (body.name !== undefined && body.name !== null && typeof body.name !== 'string') {
+      throw new HttpError(400, t('common.invalidRequestBody'))
+    }
 
-  const body = (await request.json().catch(() => null)) as
-    | {
-        name?: string
-        description?: string | null
-        trigger_type?: 'keyword' | 'first_inbound_message' | 'manual'
-        trigger_config?: Record<string, unknown>
-        /**
-         * If set, clone the matching template's name + trigger +
-         * entry_node_id + nodes[] into a fresh draft for this user.
-         * `name` from the body overrides the template default if
-         * provided.
-         */
-        template_slug?: string
+    // -------- Template clone path --------
+    if (body.template_slug) {
+      const template = getFlowTemplate(body.template_slug)
+      if (!template) {
+        throw new HttpError(400, t('flows.unknownTemplate', { slug: String(body.template_slug) }))
       }
-    | null
-  if (!body) {
-    return NextResponse.json({ error: t('common.invalidJson') }, { status: 400 })
-  }
-
-  const admin = supabaseAdmin()
-
-  // -------- Template clone path --------
-  if (body.template_slug) {
-    const template = getFlowTemplate(body.template_slug)
-    if (!template) {
-      return NextResponse.json(
-        { error: t('flows.unknownTemplate', { slug: String(body.template_slug) }) },
-        { status: 400 },
-      )
-    }
-    const { data: flow, error: flowErr } = await admin
-      .from('flows')
-      .insert({
-        user_id: userId,
-        account_id: accountId,
-        name: body.name?.trim() || template.name,
-        description: template.description,
-        status: 'draft',
-        trigger_type: template.trigger_type,
-        trigger_config: template.trigger_config,
-        entry_node_id: template.entry_node_id,
-      })
-      .select()
-      .single()
-    if (flowErr || !flow) {
-      return NextResponse.json(
-        { error: flowErr?.message ?? t('flows.insertFailed') },
-        { status: 500 },
-      )
-    }
-    if (template.nodes.length > 0) {
-      const { error: nodesErr } = await admin.from('flow_nodes').insert(
-        template.nodes.map((n) => ({
-          flow_id: flow.id,
-          node_key: n.node_key,
-          node_type: n.node_type,
-          config: n.config,
-        })),
-      )
-      if (nodesErr) {
-        // Roll back the parent flow so a half-cloned template doesn't
-        // sit as an empty draft. CASCADE on flow_id removes the
-        // (probably zero) nodes too.
-        await admin.from('flows').delete().eq('id', flow.id)
-        return NextResponse.json(
-          { error: nodesErr.message },
-          { status: 500 },
+      // Flow + nodes in one transaction: a failed node insert rolls the
+      // parent back, so a half-cloned template never sits as an empty
+      // draft.
+      const flow = await asUser(ctx.userId, async (db) => {
+        const created = await insertFlow(db, {
+          user_id: ctx.userId,
+          account_id: ctx.accountId,
+          name: body.name?.trim() || template.name,
+          description: template.description,
+          status: 'draft',
+          trigger_type: template.trigger_type,
+          trigger_config: template.trigger_config,
+          entry_node_id: template.entry_node_id,
+        })
+        await insertFlowNodes(
+          db,
+          ctx.accountId,
+          created.id,
+          template.nodes.map((n) => ({
+            node_key: n.node_key,
+            node_type: n.node_type,
+            config: n.config,
+          })),
         )
-      }
+        return created
+      })
+      return NextResponse.json({ flow }, { status: 201 })
     }
-    return NextResponse.json({ flow }, { status: 201 })
-  }
 
-  // -------- Plain (empty) create path --------
-  if (!body.name?.trim()) {
-    return NextResponse.json({ error: t('flows.nameRequired') }, { status: 400 })
-  }
-  const trigger_type = body.trigger_type ?? 'keyword'
+    // -------- Plain (empty) create path --------
+    if (!body.name?.trim()) {
+      throw new HttpError(400, t('flows.nameRequired'))
+    }
+    const name = body.name.trim()
+    const trigger_type = body.trigger_type ?? 'keyword'
 
-  const { data, error } = await admin
-    .from('flows')
-    .insert({
-      user_id: userId,
-      account_id: accountId,
-      name: body.name.trim(),
-      description: body.description ?? null,
-      status: 'draft',
-      trigger_type,
-      trigger_config: body.trigger_config ?? {},
-    })
-    .select()
-    .single()
-  if (error || !data) {
-    return NextResponse.json(
-      { error: error?.message ?? t('common.insertFailed') },
-      { status: 500 },
+    const flow = await asUser(ctx.userId, (db) =>
+      insertFlow(db, {
+        user_id: ctx.userId,
+        account_id: ctx.accountId,
+        name,
+        description: body.description ?? null,
+        status: 'draft',
+        trigger_type,
+        trigger_config: body.trigger_config ?? {},
+      }),
     )
+    return NextResponse.json({ flow }, { status: 201 })
+  } catch (err) {
+    return toErrorResponse(err)
   }
-  return NextResponse.json({ flow: data }, { status: 201 })
 }

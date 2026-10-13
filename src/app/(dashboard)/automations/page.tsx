@@ -18,7 +18,7 @@ import {
   Loader2,
 } from "lucide-react"
 
-import { createClient } from "@/lib/supabase/client"
+import { listAutomations } from "@/lib/automations/automations-api"
 import { useCan } from "@/hooks/use-can"
 import { useTranslations } from "next-intl"
 import type { Automation } from "@/types"
@@ -69,20 +69,17 @@ export default function AutomationsPage() {
   const [deleting, setDeleting] = useState(false)
 
   async function load() {
-    try {
-      const supabase = createClient()
-      const { data, error: fetchErr } = await supabase
-        .from("automations")
-        .select("*")
-        .order("created_at", { ascending: false })
-      if (fetchErr) throw fetchErr
-      setAutomations((data ?? []) as Automation[])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("loadFailed"))
+    const { data, error: fetchErr } = await listAutomations()
+    if (fetchErr) {
+      setError(fetchErr.message || t("loadFailed"))
+      return
     }
+    setAutomations(data.automations ?? [])
   }
 
   useEffect(() => {
+    // State is only set after the awaited request resolves.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load()
   }, [])
 

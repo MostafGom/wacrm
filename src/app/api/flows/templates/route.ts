@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from '@/lib/auth/server-session'
 import { listFlowTemplates } from '@/lib/flows/templates'
 import { getT } from '@/lib/i18n/translate'
 
@@ -16,11 +16,8 @@ const t = getT('Api')
  * Available to any signed-in user. Flows is in soft-GA.
  */
 export async function GET() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
+  const session = await getServerSession()
+  if (!session) {
     return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
   }
   // Shallow shape so the client gallery doesn't have to know about

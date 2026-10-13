@@ -61,7 +61,7 @@ import {
   blankListPayload,
 } from "@/components/interactive/interactive-builder"
 import { interactivePayloadPreviewText } from "@/lib/whatsapp/interactive"
-import { createClient } from "@/lib/supabase/client"
+import { getBuilderResources } from "@/lib/automations/automations-api"
 import {
   childPath,
   insertAt,
@@ -256,34 +256,19 @@ function ResourcesProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
-    const supabase = createClient()
 
-    // Tags, templates and custom fields come straight from the DB — RLS
-    // scopes them to the caller's account. Only APPROVED templates can
+    // Tags, templates, custom fields and pipelines come from one route,
+    // scoped to the caller's account. Only APPROVED templates can
     // actually be sent (anything else 400s at send time), matching the
-    // broadcast picker.
+    // broadcast picker. On error the pickers stay empty, as before.
     void (async () => {
-      const [tagsRes, templatesRes, customFieldsRes, pipelinesRes, stagesRes] =
-        await Promise.all([
-          supabase.from("tags").select("*").order("name"),
-          supabase
-            .from("message_templates")
-            .select("*")
-            .eq("status", "APPROVED")
-            .order("name"),
-          supabase.from("custom_fields").select("*").order("field_name"),
-          supabase.from("pipelines").select("id, name").order("name"),
-          supabase
-            .from("pipeline_stages")
-            .select("id, name, pipeline_id, position")
-            .order("position"),
-        ])
-      if (cancelled) return
-      setTags((tagsRes.data as TagRecord[] | null) ?? [])
-      setTemplates((templatesRes.data as MessageTemplate[] | null) ?? [])
-      setCustomFields((customFieldsRes.data as CustomField[] | null) ?? [])
-      setPipelines((pipelinesRes.data as PipelineOption[] | null) ?? [])
-      setStages((stagesRes.data as PipelineStageOption[] | null) ?? [])
+      const { data } = await getBuilderResources()
+      if (cancelled || !data) return
+      setTags(data.tags ?? [])
+      setTemplates(data.templates ?? [])
+      setCustomFields(data.custom_fields ?? [])
+      setPipelines(data.pipelines ?? [])
+      setStages(data.stages ?? [])
     })()
 
     // Members go through the API so we inherit its email-visibility

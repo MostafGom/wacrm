@@ -2,24 +2,14 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 
 // ============================================================
 // Fakes for the interpolation tests at the bottom of this file
-// (issue #553). Same shape as dispatch.test.ts: a minimal Supabase
-// query-builder stand-in plus a stubbed meta-send, so we can drive the
-// real `dispatchInboundToFlows` and assert on the payload that would
+// (issue #553). Same setup as dispatch.test.ts: in-memory repository
+// fakes (./engine-test-fakes) plus a stubbed meta-send, so we can drive
+// the real `dispatchInboundToFlows` and assert on the payload that would
 // have gone to Meta. vi.mock is hoisted above the imports below, so
 // the pure-helper tests are unaffected — they never touch either.
 // ============================================================
 
 const h = vi.hoisted(() => ({
-  state: {
-    /** Rows loadActiveRunForContact sees. */
-    activeRuns: [] as Record<string, unknown>[],
-    flows: [] as unknown[],
-    nodes: [] as unknown[],
-    /** flow_run_events INSERTs (what logEvent wrote). */
-    events: [] as Record<string, unknown>[],
-    /** Every UPDATE, by table. */
-    updates: [] as { table: string; row: Record<string, unknown> }[],
-  },
   sendButtons: vi.fn<
     (
       args: Parameters<typeof engineSendInteractiveButtons>[0],
@@ -32,51 +22,10 @@ const h = vi.hoisted(() => ({
   >(async () => ({ whatsapp_message_id: "wamid.4" })),
 }));
 
-vi.mock("./admin-client", () => {
-  function rows(table: string): unknown[] {
-    if (table === "flow_runs") return h.state.activeRuns;
-    if (table === "flows") return h.state.flows;
-    if (table === "flow_nodes") return h.state.nodes;
-    return [];
-  }
-
-  function builder(table: string) {
-    const b: Record<string, unknown> = {
-      select: () => b,
-      eq: () => b,
-      is: () => b,
-      in: () => b,
-      filter: () => b,
-      order: () => b,
-      limit: () => b,
-      update: (row: Record<string, unknown>) => {
-        h.state.updates.push({ table, row });
-        return b;
-      },
-      insert: (row: Record<string, unknown>) => {
-        if (table === "flow_run_events") h.state.events.push(row);
-        return b;
-      },
-      maybeSingle: async () => ({ data: rows(table)[0] ?? null, error: null }),
-      single: async () => ({ data: rows(table)[0] ?? null, error: null }),
-      then: (
-        resolve: (r: {
-          data: unknown[];
-          error: null;
-          count: number;
-        }) => unknown,
-      ) => resolve({ data: rows(table), error: null, count: 0 }),
-    };
-    return b;
-  }
-
-  return {
-    supabaseAdmin: () => ({
-      from: (t: string) => builder(t),
-      rpc: () => Promise.resolve({ error: null }),
-    }),
-  };
-});
+vi.mock("@/server/db", async () => (await import("@/test/auth-mocks")).dbModule());
+vi.mock("@/server/repos/flows", async () => (await import("./engine-test-fakes")).flowFakes.flows);
+vi.mock("@/server/repos/flow-runs", async () => (await import("./engine-test-fakes")).flowFakes.runs);
+vi.mock("@/server/repos/engine-data", async () => (await import("./engine-test-fakes")).flowFakes.data);
 
 vi.mock("./meta-send", () => ({
   engineSendText: vi.fn(async () => ({ whatsapp_message_id: "wamid.1" })),
@@ -99,6 +48,9 @@ import type {
   engineSendInteractiveList,
 } from "./meta-send";
 import type { ParsedInbound } from "./types";
+import { flowFakes, resetFlowFakes } from "./engine-test-fakes";
+
+const fakes = flowFakes.state;
 
 describe("matchReplyId", () => {
   it("returns null for nodes without options", () => {
@@ -517,11 +469,12 @@ function text(t: string): ParsedInbound {
 
 describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
   beforeEach(() => {
-    h.state.activeRuns = [{ ...RUN, vars: {} }];
-    h.state.flows = [FLOW];
-    h.state.nodes = nodesEndingIn("choose");
-    h.state.events = [];
-    h.state.updates = [];
+    resetFlowFakes();
+    fakes.activeRuns = [{ ...RUN, vars: {} }];
+    fakes.flows = [FLOW];
+    fakes.nodes = nodesEndingIn("choose");
+    fakes.events = [];
+    fakes.updates = [];
   });
 
   it("send_buttons after collect_input renders body, header and button titles", async () => {
@@ -538,7 +491,7 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
       { id: "no_{{vars.name}}", title: "No thanks" },
     ]);
     // The run really suspended on the buttons node.
-    expect(h.state.updates).toContainEqual(
+    expect(fakes.updates).toContainEqual(
       expect.objectContaining({
         table: "flow_runs",
         row: expect.objectContaining({ current_node_key: "choose" }),
@@ -547,7 +500,7 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
   });
 
   it("send_list after collect_input renders body, button label, footer, section and row text", async () => {
-    h.state.nodes = nodesEndingIn("pick");
+    fakes.nodes = nodesEndingIn("pick");
 
     const result = await dispatch(text("Alice"));
 
@@ -572,7 +525,7 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
   it("reprompt re-sends the interactive node with the same interpolation", async () => {
     // Run already suspended on the buttons node with the var captured;
     // the customer types instead of tapping → fallback → reprompt.
-    h.state.activeRuns = [
+    fakes.activeRuns = [
       { ...RUN, current_node_key: "choose", vars: { name: "Alice" } },
     ];
 
@@ -604,7 +557,7 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
     // Previously the throw escaped to dispatchInboundToFlows' catch:
     // consumed:false, nothing in flow_run_events, run left active.
     expect(result).toMatchObject({ consumed: true, outcome: "completed" });
-    expect(h.state.events).toContainEqual(
+    expect(fakes.events).toContainEqual(
       expect.objectContaining({
         event_type: "error",
         node_key: "choose",
@@ -614,7 +567,7 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
         },
       }),
     );
-    expect(h.state.updates).toContainEqual(
+    expect(fakes.updates).toContainEqual(
       expect.objectContaining({
         table: "flow_runs",
         row: expect.objectContaining({
