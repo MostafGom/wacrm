@@ -72,5 +72,8 @@ jobs:
       - name: Verify the resulting schema
         run: psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -f db/ci/verify-schema.sql
 
+      - name: Generated DB types are up to date
+        run: npm run db:types -- --verify
+
       - name: Integration tests (adapter, RLS, auth, storage, realtime)
         run: npm run test:integration

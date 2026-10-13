@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { createClient } from "@/lib/supabase/client";
+import { getAuthClient } from "@/lib/auth/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +23,7 @@ export default function ForgotPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [mailEnabled, setMailEnabled] = useState(true);
-  const supabase = createClient();
+  const auth = getAuthClient();
 
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,7 +34,7 @@ export default function ForgotPasswordPage() {
     // for a recovery session and forwards to /reset-password (issue
     // #592). Without SMTP no email is sent — the page then tells the
     // user to ask a workspace owner for a reset link instead.
-    const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+    const { data, error } = await auth.resetPasswordForEmail(email, {
       redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent("/reset-password")}`,
     });
 

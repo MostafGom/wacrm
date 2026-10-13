@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2, LogOut } from 'lucide-react';
 
-import { createClient } from '@/lib/supabase/client';
+import { getAuthClient } from '@/lib/auth/client';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -25,7 +25,7 @@ import { useTranslations } from 'next-intl';
 
 export function SessionsCard() {
   const t = useTranslations('Settings.profile');
-  const supabase = createClient();
+  const auth = getAuthClient();
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
@@ -35,7 +35,7 @@ export function SessionsCard() {
       // scope: 'global' revokes every refresh token for this user
       // across all devices; the next auth-state change on this tab
       // triggers the usual redirect.
-      const { error } = await supabase.auth.signOut({ scope: 'global' });
+      const { error } = await auth.signOut({ scope: 'global' });
       if (error) {
         toast.error(t('signOutFailed', { message: error.message }));
         return;

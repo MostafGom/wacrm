@@ -6,7 +6,7 @@ import pg from "pg";
 import { inject } from "vitest";
 
 import { refreshCatalog } from "@/lib/db/catalog";
-import { closePool } from "@/lib/db/pool";
+import { closePool } from "@/server/db/pool";
 import { createServerDb } from "@/lib/db/server-client";
 import type { DbClient } from "@/lib/db/types";
 

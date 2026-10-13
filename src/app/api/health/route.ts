@@ -1,7 +1,7 @@
 // GET /api/health — liveness + database reachability, for the
 // docker-compose healthcheck and uptime monitors. No auth, no data.
 
-import { getPool } from '@/lib/db/pool'
+import { getPool } from '@/server/db/pool'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'

@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { RealtimeChannel } from "@/lib/db";
+import type { RealtimeChannel } from "@/lib/realtime/types";
 
-import { createClient } from "@/lib/supabase/client";
+import { apiRequest } from "@/lib/http/client";
+import { createChannel } from "@/lib/realtime/client";
 import { useAuth } from "@/hooks/use-auth";
 import {
   derivePresence,
@@ -58,7 +59,6 @@ export function usePresence(enabled = true): UsePresenceResult {
   useEffect(() => {
     if (!active || !accountId) return;
 
-    const supabase = createClient();
     let cancelled = false;
 
     const applyRow = (row: {
@@ -80,8 +80,7 @@ export function usePresence(enabled = true): UsePresenceResult {
     // Realtime has already delivered (keeping the newer last_seen_at)
     // rather than replacing the map — so an event that lands while the
     // fetch is in flight isn't clobbered by a staler snapshot row.
-    const channel: RealtimeChannel = supabase
-      .channel(`presence:${accountId}`)
+    const channel: RealtimeChannel = createChannel(`presence:${accountId}`)
       .on(
         "postgres_changes",
         {
@@ -113,11 +112,9 @@ export function usePresence(enabled = true): UsePresenceResult {
       )
       .subscribe();
 
-    supabase
-      .from("member_presence")
-      .select("user_id, status, last_seen_at")
-      .eq("account_id", accountId)
-      .then(({ data, error }) => {
+    apiRequest<{ presence: { user_id: string; status: StoredPresence; last_seen_at: string }[] }>(
+      "/api/presence",
+    ).then(({ data, error }) => {
         if (cancelled) return;
         if (error) {
           console.error("[usePresence] initial fetch error:", error.message);
@@ -125,7 +122,7 @@ export function usePresence(enabled = true): UsePresenceResult {
         }
         setRows((prev) => {
           const next = new Map(prev);
-          for (const r of data ?? []) {
+          for (const r of data.presence) {
             const userId = r.user_id as string;
             const incoming: PresenceRow = {
               status: r.status as StoredPresence,
@@ -150,7 +147,7 @@ export function usePresence(enabled = true): UsePresenceResult {
     return () => {
       cancelled = true;
       clearInterval(tick);
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
     };
   }, [active, accountId]);
 

@@ -7,7 +7,7 @@
 import { DbRequestError, type DbAst, type DbResult, type QueryAst, type RpcAst } from "./ast";
 import { getCatalog } from "./catalog";
 import { compileQuery, compileRpc } from "./compile";
-import { getPool } from "./pool";
+import { getPool } from "@/server/db/pool";
 import { mapPgError, statusForPgCode, withRole, type DbRole } from "./tx";
 
 export interface ExecOptions {

@@ -18,7 +18,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { createClient } from "@/lib/supabase/client";
+import { getAuthClient } from "@/lib/auth/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,7 +35,7 @@ type Status = "checking" | "ready" | "expired" | "done";
 
 export default function ResetPasswordPage() {
   const t = useTranslations("ResetPasswordPage");
-  const supabase = createClient();
+  const auth = getAuthClient();
 
   const [status, setStatus] = useState<Status>("checking");
   const [password, setPassword] = useState("");
@@ -47,13 +47,13 @@ export default function ResetPasswordPage() {
     let cancelled = false;
     // The callback wrote the session cookies server-side; the browser
     // client reads them here. No user → the link didn't yield a session.
-    supabase.auth.getUser().then(({ data: { user } }) => {
+    auth.getUser().then(({ data: { user } }) => {
       if (!cancelled) setStatus(user ? "ready" : "expired");
     });
     return () => {
       cancelled = true;
     };
-  }, [supabase]);
+  }, [auth]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,7 +70,7 @@ export default function ResetPasswordPage() {
     }
 
     setSaving(true);
-    const { error } = await supabase.auth.updateUser({ password });
+    const { error } = await auth.updateUser({ password });
     setSaving(false);
 
     if (error) {

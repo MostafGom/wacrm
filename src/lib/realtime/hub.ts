@@ -10,7 +10,7 @@
 
 import pg from "pg";
 
-import { withRole } from "@/lib/db/tx";
+import { asService, sql } from "@/server/db";
 
 export interface RealtimeEvent {
   t: string;
@@ -141,11 +141,12 @@ class Hub {
 async function refetch(e: RealtimeEvent): Promise<Record<string, unknown> | null> {
   if (!e.id || !REFETCHABLE.has(e.t)) return null;
   const pk = PK_COLUMN[e.t] ?? "id";
-  return withRole("service_role", null, async (c) => {
-    // Table/column come from the fixed allowlists above, never from input.
-    const r = await c.query(`SELECT to_jsonb(x) AS row FROM public."${e.t}" x WHERE x."${pk}" = $1`, [e.id]);
-    return (r.rows[0]?.row as Record<string, unknown>) ?? null;
-  });
+  const id = e.id;
+  // Table/column come from the fixed allowlists above, never from input.
+  const r = await asService((db) =>
+    sql<{ row: Record<string, unknown> }>`SELECT to_jsonb(x) AS row FROM ${sql.table(`public.${e.t}`)} x WHERE ${sql.ref(`x.${pk}`)} = ${id}`.execute(db),
+  );
+  return r.rows[0]?.row ?? null;
 }
 
 const g = globalThis as unknown as { __wacrmRealtimeHub?: Hub };

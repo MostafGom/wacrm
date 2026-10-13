@@ -12,9 +12,9 @@
 
 import { createHash, randomBytes } from "node:crypto";
 
-import { withRole } from "@/lib/db/tx";
-import type { User } from "@/lib/db/types";
-import { isBlocked, toUser, USER_COLUMNS, type AuthUserRow } from "./users";
+import { asService, sql } from "@/server/db";
+import type { User } from "./types";
+import { isBlocked, toUser } from "./users";
 
 export const SESSION_COOKIE = "wacrm_session";
 
@@ -66,6 +66,10 @@ function cacheDropUser(userId: string): void {
   for (const [k, v] of cache) if (v.value.user.id === userId) cache.delete(k);
 }
 
+function isIp(v: string | null | undefined): v is string {
+  return !!v && (/^[0-9.]+$/.test(v) || /^[0-9a-fA-F:]+$/.test(v));
+}
+
 // ---- API ------------------------------------------------------------
 
 export async function createSession(
@@ -74,20 +78,20 @@ export async function createSession(
 ): Promise<{ token: string; expiresAt: Date }> {
   const token = newToken();
   const expiresAt = sessionExpiry();
-  const ip = meta.ip && meta.ip !== "unknown" ? meta.ip : null;
-  await withRole("service_role", null, async (c) => {
-    await c.query(
-      `INSERT INTO auth.sessions (user_id, token_hash, user_agent, ip, expires_at)
-       VALUES ($1, $2, $3, $4::inet, $5)`,
-      [userId, hashToken(token), meta.userAgent?.slice(0, 512) ?? null, isIp(ip) ? ip : null, expiresAt],
-    );
-    await c.query("UPDATE auth.users SET last_sign_in_at = now() WHERE id = $1", [userId]);
+  await asService(async (db) => {
+    await db
+      .insertInto("auth.sessions")
+      .values({
+        user_id: userId,
+        token_hash: hashToken(token),
+        user_agent: meta.userAgent?.slice(0, 512) ?? null,
+        ip: isIp(meta.ip) ? meta.ip : null,
+        expires_at: expiresAt.toISOString(),
+      })
+      .execute();
+    await db.updateTable("auth.users").set({ last_sign_in_at: sql<string>`now()` }).where("id", "=", userId).execute();
   });
   return { token, expiresAt };
-}
-
-function isIp(v: string | null): v is string {
-  return !!v && (/^[0-9.]+$/.test(v) || /^[0-9a-fA-F:]+$/.test(v));
 }
 
 /** Validate a cookie token. Returns null when missing/expired/revoked. */
@@ -97,23 +101,37 @@ export async function validateSession(token: string | undefined | null): Promise
   const cached = cacheGet(key);
   if (cached && cached.expiresAt.getTime() > Date.now()) return cached;
 
-  const result = await withRole("service_role", null, async (c) => {
-    const r = await c.query<AuthUserRow & { session_id: string; expires_at: Date; last_seen_at: Date }>(
-      `SELECT s.id AS session_id, s.expires_at, s.last_seen_at, ${USER_COLUMNS}
-         FROM auth.sessions s JOIN auth.users u ON u.id = s.user_id
-        WHERE s.token_hash = $1 AND s.expires_at > now()`,
-      [hashToken(token)],
-    );
-    const row = r.rows[0];
+  const result = await asService(async (db) => {
+    const row = await db
+      .selectFrom("auth.sessions as s")
+      .innerJoin("auth.users as u", "u.id", "s.user_id")
+      .select([
+        "s.id as session_id",
+        "s.expires_at",
+        "s.last_seen_at",
+        "u.id",
+        "u.email",
+        "u.email_confirmed_at",
+        "u.raw_user_meta_data",
+        "u.raw_app_meta_data",
+        "u.created_at",
+        "u.last_sign_in_at",
+        "u.banned_until",
+        "u.deleted_at",
+      ])
+      .where("s.token_hash", "=", hashToken(token))
+      .where("s.expires_at", ">", sql<string>`now()`)
+      .executeTakeFirst();
     if (!row || isBlocked(row)) return null;
 
-    let expiresAt = row.expires_at;
-    if (Date.now() - row.last_seen_at.getTime() > SESSION_TOUCH_MS) {
+    let expiresAt = new Date(row.expires_at);
+    if (Date.now() - new Date(row.last_seen_at).getTime() > SESSION_TOUCH_MS) {
       expiresAt = sessionExpiry();
-      await c.query("UPDATE auth.sessions SET last_seen_at = now(), expires_at = $2 WHERE id = $1", [
-        row.session_id,
-        expiresAt,
-      ]);
+      await db
+        .updateTable("auth.sessions")
+        .set({ last_seen_at: sql<string>`now()`, expires_at: expiresAt.toISOString() })
+        .where("id", "=", row.session_id)
+        .execute();
     }
     return { sessionId: row.session_id, user: toUser(row), expiresAt };
   });
@@ -124,19 +142,17 @@ export async function validateSession(token: string | undefined | null): Promise
 
 export async function revokeSessionToken(token: string): Promise<void> {
   cache.delete(hashToken(token).toString("hex"));
-  await withRole("service_role", null, (c) =>
-    c.query("DELETE FROM auth.sessions WHERE token_hash = $1", [hashToken(token)]),
-  );
+  await asService((db) => db.deleteFrom("auth.sessions").where("token_hash", "=", hashToken(token)).execute());
 }
 
 /** Sign out everywhere (optionally keeping one session). */
 export async function revokeAllSessions(userId: string, exceptSessionId?: string): Promise<void> {
   cacheDropUser(userId);
-  await withRole("service_role", null, (c) =>
-    exceptSessionId
-      ? c.query("DELETE FROM auth.sessions WHERE user_id = $1 AND id <> $2", [userId, exceptSessionId])
-      : c.query("DELETE FROM auth.sessions WHERE user_id = $1", [userId]),
-  );
+  await asService((db) => {
+    let q = db.deleteFrom("auth.sessions").where("user_id", "=", userId);
+    if (exceptSessionId) q = q.where("id", "<>", exceptSessionId);
+    return q.execute();
+  });
 }
 
 /** Drop cached entries for a user (after profile/email/password changes). */

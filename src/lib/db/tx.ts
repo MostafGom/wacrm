@@ -19,7 +19,7 @@
 import type { PoolClient } from "pg";
 
 import type { DbError } from "./ast";
-import { getPool } from "./pool";
+import { getPool } from "@/server/db/pool";
 
 export type DbRole = "anon" | "authenticated" | "service_role";
 

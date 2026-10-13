@@ -5,7 +5,7 @@
 // an upload is remembered and handed back by getPublicUrl; for paths
 // this tab didn't upload it falls back to the current origin.
 
-import type { StorageApi, StorageBucketApi, StorageError } from "@/lib/db/types";
+import type { StorageApi, StorageBucketApi, StorageError } from "./types";
 import { publicObjectUrl } from "./public-url";
 
 const known = new Map<string, string>();
@@ -64,4 +64,12 @@ export function createBrowserStorage(): StorageApi {
       };
     },
   };
+}
+
+let browserStorage: StorageApi | null = null;
+
+/** Shared browser storage client: `getBrowserStorage().from('chat-media').upload(...)`. */
+export function getBrowserStorage(): StorageApi {
+  browserStorage ??= createBrowserStorage();
+  return browserStorage;
 }

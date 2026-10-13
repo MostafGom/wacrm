@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { Loader2, KeyRound } from 'lucide-react';
 
-import { createClient } from '@/lib/supabase/client';
+import { getAuthClient } from '@/lib/auth/client';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,7 +23,7 @@ const MIN_PASSWORD = 8;
 export function PasswordForm() {
   const t = useTranslations('Settings.profile');
   const { profile } = useAuth();
-  const supabase = createClient();
+  const auth = getAuthClient();
 
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
@@ -53,7 +53,7 @@ export function PasswordForm() {
       // session" API, so we re-authenticate with the provided current
       // password. If it matches, the session refreshes silently; if it
       // doesn't, we abort before calling updateUser.
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      const { error: signInError } = await auth.signInWithPassword({
         email: profile.email,
         password: current,
       });
@@ -62,7 +62,7 @@ export function PasswordForm() {
         return;
       }
 
-      const { error: updateError } = await supabase.auth.updateUser({
+      const { error: updateError } = await auth.updateUser({
         password: next,
       });
       if (updateError) {

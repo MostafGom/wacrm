@@ -128,6 +128,22 @@ function makeSupabaseMock() {
 
 let supabaseMock = makeSupabaseMock()
 
+// requireRole runs for real: session + profile come from these mocks,
+// with the role read from `callerRole` at call time.
+vi.mock('@/lib/auth/server-session', async () =>
+  (await import('@/test/auth-mocks')).sessionModule({ userId: 'user-1', accountId: 'acct-1', role: null }),
+)
+vi.mock('@/server/repos/profiles', async () =>
+  (await import('@/test/auth-mocks')).profilesModule({
+    userId: 'user-1',
+    accountId: 'acct-1',
+    get role() {
+      return callerRole
+    },
+  }),
+)
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+
 vi.mock('@/lib/supabase/server', () => ({
   createClient: vi.fn(async () => supabaseMock),
 }))

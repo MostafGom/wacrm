@@ -11,19 +11,12 @@
 //     size / MIME limits, which are enforced here from storage.buckets.
 // ============================================================
 
-import type { PoolClient } from "pg";
+import { sql } from "kysely";
 
-import { withRole, type DbRole } from "@/lib/db/tx";
-import type { StorageApi, StorageBucketApi, StorageError } from "@/lib/db/types";
+import { withRole, type Db, type DbRole } from "@/server/db";
+import type { StorageApi, StorageBucketApi, StorageError } from "./types";
 import { assertValidBucket, assertValidObjectPath, getDriver, InvalidObjectPathError } from "./driver";
 import { publicObjectUrl } from "./public-url";
-
-interface BucketRow {
-  id: string;
-  public: boolean;
-  file_size_limit: string | null;
-  allowed_mime_types: string[] | null;
-}
 
 export class StorageApiError extends Error {
   constructor(
@@ -77,13 +70,14 @@ export function sniffMatches(mime: string, bytes: Buffer): boolean {
   }
 }
 
-async function loadBucket(client: PoolClient, bucket: string): Promise<BucketRow> {
-  const r = await client.query<BucketRow>(
-    "SELECT id, public, file_size_limit, allowed_mime_types FROM storage.buckets WHERE id = $1",
-    [bucket],
-  );
-  if (!r.rows[0]) throw new StorageApiError("Bucket not found", 404);
-  return r.rows[0];
+async function loadBucket(db: Db, bucket: string) {
+  const row = await db
+    .selectFrom("storage.buckets")
+    .select(["id", "public", "file_size_limit", "allowed_mime_types"])
+    .where("id", "=", bucket)
+    .executeTakeFirst();
+  if (!row) throw new StorageApiError("Bucket not found", 404);
+  return row;
 }
 
 async function toBuffer(body: unknown): Promise<Buffer> {
@@ -110,10 +104,10 @@ export async function uploadObject(role: DbRole, userId: string | null, input: U
   const mime = normalizeMime(input.contentType);
   const driver = await getDriver();
 
-  await withRole(role, userId, async (client) => {
+  await withRole(role, userId, async (db) => {
     // Bucket limits are read as the caller too; storage.buckets is
     // readable by every role (000_supabase_compat).
-    const bucket = await loadBucket(client, input.bucket);
+    const bucket = await loadBucket(db, input.bucket);
     const limit = bucket.file_size_limit ? Number(bucket.file_size_limit) : null;
     if (limit !== null && input.body.length > limit) {
       throw new StorageApiError("The object exceeded the maximum allowed size", 413);
@@ -130,15 +124,21 @@ export async function uploadObject(role: DbRole, userId: string | null, input: U
       size: input.body.length,
       cacheControl: input.cacheControl ? `max-age=${input.cacheControl}` : "max-age=3600",
     };
-    const conflict = input.upsert
-      ? "ON CONFLICT (bucket_id, name) DO UPDATE SET metadata = EXCLUDED.metadata, owner = EXCLUDED.owner, updated_at = now()"
-      : "ON CONFLICT (bucket_id, name) DO NOTHING";
-    const r = await client.query(
-      `INSERT INTO storage.objects (bucket_id, name, owner, metadata)
-       VALUES ($1, $2, $3, $4::jsonb) ${conflict} RETURNING id`,
-      [input.bucket, input.path, userId, JSON.stringify(metadata)],
-    );
-    if (r.rowCount === 0) throw new StorageApiError("The resource already exists", 409);
+    const inserted = await db
+      .insertInto("storage.objects")
+      .values({ bucket_id: input.bucket, name: input.path, owner: userId, metadata: JSON.stringify(metadata) })
+      .onConflict((oc) =>
+        input.upsert
+          ? oc.columns(["bucket_id", "name"]).doUpdateSet({
+              metadata: (eb) => eb.ref("excluded.metadata"),
+              owner: (eb) => eb.ref("excluded.owner"),
+              updated_at: sql<string>`now()`,
+            })
+          : oc.columns(["bucket_id", "name"]).doNothing(),
+      )
+      .returning("id")
+      .executeTakeFirst();
+    if (!inserted) throw new StorageApiError("The resource already exists", 409);
 
     // Write the bytes while the row is still uncommitted: if the write
     // fails the metadata rolls back with it.
@@ -161,12 +161,14 @@ export async function removeObjects(
   assertValidBucket(bucket);
   paths.forEach(assertValidObjectPath);
   if (paths.length === 0) return [];
-  const removed = await withRole(role, userId, async (client) => {
-    const r = await client.query<{ name: string }>(
-      "DELETE FROM storage.objects WHERE bucket_id = $1 AND name = ANY($2::text[]) RETURNING name",
-      [bucket, paths],
-    );
-    return r.rows.map((x) => x.name);
+  const removed = await withRole(role, userId, async (db) => {
+    const rows = await db
+      .deleteFrom("storage.objects")
+      .where("bucket_id", "=", bucket)
+      .where("name", "in", paths)
+      .returning("name")
+      .execute();
+    return rows.map((x) => x.name);
   });
   if (removed.length > 0) {
     const driver = await getDriver();
@@ -184,20 +186,22 @@ export async function getPublicObjectMeta(
 ): Promise<{ mimetype: string; size: number; updatedAt: string; cacheControl: string } | null> {
   assertValidBucket(bucket);
   assertValidObjectPath(path);
-  return withRole("service_role", null, async (client) => {
-    const r = await client.query<{ metadata: Record<string, unknown>; updated_at: Date }>(
-      `SELECT o.metadata, o.updated_at
-         FROM storage.objects o JOIN storage.buckets b ON b.id = o.bucket_id
-        WHERE o.bucket_id = $1 AND o.name = $2 AND b.public`,
-      [bucket, path],
-    );
-    const row = r.rows[0];
+  return withRole("service_role", null, async (db) => {
+    const row = await db
+      .selectFrom("storage.objects as o")
+      .innerJoin("storage.buckets as b", "b.id", "o.bucket_id")
+      .select(["o.metadata", "o.updated_at"])
+      .where("o.bucket_id", "=", bucket)
+      .where("o.name", "=", path)
+      .where("b.public", "=", true)
+      .executeTakeFirst();
     if (!row) return null;
+    const metadata = (row.metadata ?? {}) as Record<string, unknown>;
     return {
-      mimetype: String(row.metadata.mimetype ?? "application/octet-stream"),
-      size: Number(row.metadata.size ?? 0),
-      updatedAt: row.updated_at.toISOString(),
-      cacheControl: String(row.metadata.cacheControl ?? "max-age=3600"),
+      mimetype: String(metadata.mimetype ?? "application/octet-stream"),
+      size: Number(metadata.size ?? 0),
+      updatedAt: row.updated_at,
+      cacheControl: String(metadata.cacheControl ?? "max-age=3600"),
     };
   });
 }

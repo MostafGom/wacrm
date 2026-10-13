@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { apiRequest } from "@/lib/http/client";
+import { createChannel } from "@/lib/realtime/client";
 import { useAuth } from "@/hooks/use-auth";
 import type { Notification } from "@/types";
 import { Bell, CheckCheck, Loader2, UserPlus } from "lucide-react";
@@ -30,18 +31,14 @@ export default function NotificationsPage() {
 
   const load = useCallback(async () => {
     if (!accountId) return;
-    const supabase = createClient();
-    const { data, error: fetchErr } = await supabase
-      .from("notifications")
-      .select("*")
-      .eq("account_id", accountId)
-      .order("created_at", { ascending: false })
-      .limit(100);
+    const { data, error: fetchErr } = await apiRequest<{ notifications: Notification[] }>(
+      "/api/notifications",
+    );
     if (fetchErr) {
       setError(fetchErr.message);
       return;
     }
-    setNotifications((data ?? []) as Notification[]);
+    setNotifications(data.notifications);
   }, [accountId]);
 
   useEffect(() => {
@@ -52,9 +49,7 @@ export default function NotificationsPage() {
   // Realtime — new assignments appear without a refresh, and a
   // "mark all read" fired from another tab/device stays in sync here.
   useEffect(() => {
-    const supabase = createClient();
-    const channel = supabase
-      .channel("notifications-page")
+    const channel = createChannel("notifications-page")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "notifications" },
@@ -83,7 +78,7 @@ export default function NotificationsPage() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
     };
   }, []);
 
@@ -99,12 +94,9 @@ export default function NotificationsPage() {
               : n,
           ) ?? prev,
       );
-      const supabase = createClient();
-      const { error: updateErr } = await supabase
-        .from("notifications")
-        .update({ read_at: new Date().toISOString() })
-        .eq("id", id)
-        .is("read_at", null);
+      const { error: updateErr } = await apiRequest(`/api/notifications/${id}`, {
+        method: "PATCH",
+      });
       if (updateErr) {
         toast.error(t("markReadFailed"));
         load();
@@ -132,11 +124,9 @@ export default function NotificationsPage() {
     setNotifications(
       (prev) => prev?.map((n) => (n.read_at ? n : { ...n, read_at: now })) ?? prev,
     );
-    const supabase = createClient();
-    const { error: updateErr } = await supabase
-      .from("notifications")
-      .update({ read_at: now })
-      .is("read_at", null);
+    const { error: updateErr } = await apiRequest("/api/notifications/read-all", {
+      method: "POST",
+    });
     setMarkingAll(false);
     if (updateErr) {
       toast.error(t("markAllFailed"));

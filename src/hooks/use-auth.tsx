@@ -10,8 +10,9 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import { createClient } from "@/lib/supabase/client";
-import type { User } from "@/lib/db";
+import { getAuthClient } from "@/lib/auth/client";
+import type { User } from "@/lib/auth/types";
+import { apiRequest } from "@/lib/http/client";
 import { DEFAULT_CURRENCY } from "@/lib/currency";
 import {
   canEditSettings as canEditSettingsFor,
@@ -157,7 +158,7 @@ interface ProfileRow {
 /**
  * AuthProvider — wrap this around the dashboard layout.
  * Makes ONE getSession() call for the whole tree instead of one per
- * component, avoiding internal lock contention in the Supabase client.
+ * component.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -182,32 +183,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // refreshProfile() callback. Reads the current session's user id and
   // pulls the matching profile row along with its account summary.
   const fetchProfile = useCallback(async (userId: string) => {
-    const supabase = createClient();
     setProfileLoading(true);
     setStatusDetail(null);
     lastFetchedUserIdRef.current = userId;
     try {
       let data: ProfileRow | null = null;
+      let accountData: { id: string; name: string; default_currency: string | null } | null = null;
       for (let attempt = 1; ; attempt++) {
-        const result = await supabase
-          .from("profiles")
-          .select(
-            "id, full_name, email, avatar_url, role, beta_features, account_id, account_role",
-          )
-          .eq("user_id", userId)
-          .maybeSingle();
+        const result = await apiRequest<{
+          profile: ProfileRow | null;
+          account: { id: string; name: string; default_currency: string | null } | null;
+        }>("/api/me");
 
         if (!result.error) {
-          data = result.data;
+          data = result.data.profile;
+          accountData = result.data.account;
           break;
         }
 
         const error = result.error;
         console.error("[AuthProvider] fetchProfile error:", {
           message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
+          status: error.status,
         });
         // One hiccup here used to lock the session read-only for good:
         // the profile stayed null, so every `useCan` gate answered
@@ -223,40 +220,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (data) {
-        // Load the account with a plain lookup by id instead of an
-        // embedded FK join. The embed (`account:accounts!inner(...)`)
-        // forces PostgREST to resolve the profiles.account_id →
-        // accounts.id relationship from its schema cache; a stale cache
-        // (common right after a migration adds the FK) makes it fail
-        // hard with PGRST200 and blanks the whole profile — the user
-        // then loses account context everywhere (issue #294). A point
-        // lookup by id needs no relationship inference, so the profile
-        // (with account_id / account_role) still resolves even if the
-        // account name lookup itself can't.
-        let accountRow: AccountSummary | null = null;
-        if (data.account_id) {
-          const { data: account, error: accountErr } = await supabase
-            .from("accounts")
-            // default_currency added in migration 021; narrowed to the
-            // USD fallback below for older schemas where it reads null.
-            .select("id, name, default_currency")
-            .eq("id", data.account_id)
-            .maybeSingle();
-          if (accountErr) {
-            console.error("[AuthProvider] fetchAccount error:", {
-              message: accountErr.message,
-              details: accountErr.details,
-              hint: accountErr.hint,
-              code: accountErr.code,
-            });
-          } else if (account) {
-            accountRow = {
-              id: account.id,
-              name: account.name,
-              default_currency: account.default_currency ?? DEFAULT_CURRENCY,
-            };
-          }
-        }
+        const accountRow: AccountSummary | null = accountData
+          ? {
+              id: accountData.id,
+              name: accountData.name,
+              // default_currency added in migration 021; USD fallback
+              // for older schemas where it reads null.
+              default_currency: accountData.default_currency ?? DEFAULT_CURRENCY,
+            }
+          : null;
 
         // Narrow the DB enum into our AccountRole union. The DB
         // constraint should make this unconditional, but a future
@@ -306,7 +278,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const supabase = createClient();
+    const auth = getAuthClient();
     let mounted = true;
 
     const safetyTimer = setTimeout(() => {
@@ -322,7 +294,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const {
           data: { session },
           error,
-        } = await supabase.auth.getSession();
+        } = await auth.getSession();
 
         if (error) console.error("[AuthProvider] getSession error:", error.message);
 
@@ -354,7 +326,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = auth.onAuthStateChange((_event, session) => {
       if (!mounted) return;
       const currentUser = session?.user ?? null;
       setUser(currentUser);
@@ -381,8 +353,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [fetchProfile]);
 
   const signOut = useCallback(async () => {
-    const supabase = createClient();
-    await supabase.auth.signOut();
+    await getAuthClient().signOut();
     setUser(null);
     setProfile(null);
     setAccount(null);

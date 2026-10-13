@@ -7,7 +7,8 @@ import path from "node:path";
 import pg from "pg";
 import type { TestProject } from "vitest/node";
 
-const DB_NAME = "wacrm_it";
+// Override with TEST_DB_NAME to run several suites against one server.
+const DB_NAME = process.env.TEST_DB_NAME ?? "wacrm_it";
 const APP_PASSWORD = "wacrm-it-app";
 
 declare module "vitest" {

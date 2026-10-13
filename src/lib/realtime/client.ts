@@ -14,7 +14,7 @@
 // the CHANNEL_ERROR → SUBSCRIBED edge to resync what it missed.
 // ============================================================
 
-import type { RealtimeChannel, RealtimePostgresChangesPayload, RealtimeStatus } from "@/lib/db/types";
+import type { RealtimeChannel, RealtimePostgresChangesPayload, RealtimeStatus } from "./types";
 
 interface WireEvent {
   t: string;

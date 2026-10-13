@@ -9,8 +9,8 @@
 // Server-only.
 // ============================================================
 
-import { withRole } from "@/lib/db/tx";
-import type { User } from "@/lib/db/types";
+import { asService, sql } from "@/server/db";
+import type { User } from "./types";
 import { hashInviteToken } from "@/lib/auth/invitations";
 import { getT } from "@/lib/i18n/translate";
 import { publicBaseUrl } from "@/lib/storage/public-url";
@@ -44,17 +44,17 @@ export interface IssuedSession {
 }
 
 async function findUserByEmail(email: string): Promise<AuthUserRow | null> {
-  return withRole("service_role", null, async (c) => {
-    const r = await c.query<AuthUserRow>(`SELECT ${USER_COLUMNS} FROM auth.users u WHERE lower(u.email) = $1`, [email]);
-    return r.rows[0] ?? null;
-  });
+  const row = await asService((db) =>
+    db.selectFrom("auth.users").select(USER_COLUMNS).where(sql`lower(email)`, "=", email).executeTakeFirst(),
+  );
+  return row ?? null;
 }
 
 export async function findUserById(id: string): Promise<AuthUserRow | null> {
-  return withRole("service_role", null, async (c) => {
-    const r = await c.query<AuthUserRow>(`SELECT ${USER_COLUMNS} FROM auth.users u WHERE u.id = $1`, [id]);
-    return r.rows[0] ?? null;
-  });
+  const row = await asService((db) =>
+    db.selectFrom("auth.users").select(USER_COLUMNS).where("id", "=", id).executeTakeFirst(),
+  );
+  return row ?? null;
 }
 
 /** Absolute link to the auth callback, which consumes `token` and forwards to `next`. */
@@ -85,17 +85,19 @@ export function nextFromRedirect(redirectTo: string | undefined, fallback: strin
 
 async function signupsAllowed(inviteToken?: string | null): Promise<boolean> {
   if ((process.env.ALLOW_SIGNUPS ?? "true").toLowerCase() !== "false") return true;
-  return withRole("service_role", null, async (c) => {
+  return asService(async (db) => {
     // The very first user can always sign up (fresh install).
-    const any = await c.query("SELECT 1 FROM auth.users LIMIT 1");
-    if (any.rowCount === 0) return true;
+    const any = await db.selectFrom("auth.users").select("id").limit(1).executeTakeFirst();
+    if (!any) return true;
     if (!inviteToken) return false;
-    const inv = await c.query(
-      `SELECT 1 FROM public.account_invitations
-        WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > now()`,
-      [hashInviteToken(inviteToken)],
-    );
-    return (inv.rowCount ?? 0) > 0;
+    const inv = await db
+      .selectFrom("account_invitations")
+      .select("id")
+      .where("token_hash", "=", hashInviteToken(inviteToken))
+      .where("accepted_at", "is", null)
+      .where("expires_at", ">", sql<string>`now()`)
+      .executeTakeFirst();
+    return Boolean(inv);
   });
 }
 
@@ -124,20 +126,33 @@ export async function signUp(
   const passwordHash = await hashPassword(input.password as string);
   const confirmNow = !isMailEnabled();
 
-  const row = await withRole("service_role", null, async (c) => {
-    const exists = await c.query("SELECT 1 FROM auth.users WHERE lower(email) = $1", [email]);
-    if (exists.rowCount) throw new AuthFailure("user_already_exists", 422, t("userExists"));
-    const r = await c.query<AuthUserRow>(
-      `INSERT INTO auth.users (email, encrypted_password, raw_user_meta_data, email_confirmed_at)
-       VALUES ($1, $2, $3::jsonb, $4)
-       RETURNING id, email, email_confirmed_at, raw_user_meta_data, raw_app_meta_data, created_at, last_sign_in_at`,
-      [email, passwordHash, JSON.stringify({ full_name: fullName }), confirmNow ? new Date() : null],
-    );
+  const row = await asService(async (db) => {
+    const exists = await db
+      .selectFrom("auth.users")
+      .select("id")
+      .where(sql`lower(email)`, "=", email)
+      .executeTakeFirst();
+    if (exists) throw new AuthFailure("user_already_exists", 422, t("userExists"));
+    const created = await db
+      .insertInto("auth.users")
+      .values({
+        email,
+        encrypted_password: passwordHash,
+        raw_user_meta_data: JSON.stringify({ full_name: fullName }),
+        email_confirmed_at: confirmNow ? new Date().toISOString() : null,
+      })
+      .returning(USER_COLUMNS)
+      .executeTakeFirstOrThrow();
     // handle_new_user (migration 017) swallows its own errors; make
     // sure it actually produced the account + owner profile.
-    const p = await c.query("SELECT 1 FROM public.profiles WHERE user_id = $1 AND account_id IS NOT NULL", [r.rows[0].id]);
-    if (!p.rowCount) throw new AuthFailure("unexpected_failure", 500, t("signupFailed"));
-    return r.rows[0];
+    const profile = await db
+      .selectFrom("profiles")
+      .select("id")
+      .where("user_id", "=", created.id)
+      .where("account_id", "is not", null)
+      .executeTakeFirst();
+    if (!profile) throw new AuthFailure("unexpected_failure", 500, t("signupFailed"));
+    return created;
   });
 
   const user = toUser(row);
@@ -174,8 +189,12 @@ export async function signInWithPassword(
 
   if (result.needsRehash) {
     const upgraded = await hashPassword(password);
-    await withRole("service_role", null, (c) =>
-      c.query("UPDATE auth.users SET encrypted_password = $2, updated_at = now() WHERE id = $1", [row.id, upgraded]),
+    await asService((db) =>
+      db
+        .updateTable("auth.users")
+        .set({ encrypted_password: upgraded, updated_at: sql<string>`now()` })
+        .where("id", "=", row.id)
+        .execute(),
     );
   }
   return { user: toUser(row), session: await createSession(row.id, meta) };
@@ -214,26 +233,25 @@ export async function consumeLink(
   const consumed = await consumeToken(token, type);
   if (!consumed) throw new AuthFailure("otp_expired", 400, t("linkInvalid"));
 
-  if (type === "signup_confirm") {
-    await withRole("service_role", null, (c) =>
-      c.query("UPDATE auth.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()) WHERE id = $1", [
-        consumed.userId,
-      ]),
-    );
-  } else if (type === "email_change" && consumed.newEmail) {
-    await withRole("service_role", null, (c) =>
-      c.query("UPDATE auth.users SET email = $2, email_confirmed_at = now(), updated_at = now() WHERE id = $1", [
-        consumed.userId,
-        consumed.newEmail,
-      ]),
+  if (type === "email_change" && consumed.newEmail) {
+    const newEmail = consumed.newEmail;
+    await asService((db) =>
+      db
+        .updateTable("auth.users")
+        .set({ email: newEmail, email_confirmed_at: sql<string>`now()`, updated_at: sql<string>`now()` })
+        .where("id", "=", consumed.userId)
+        .execute(),
     );
     invalidateUserCache(consumed.userId);
-  } else if (type === "recovery") {
-    // Clicking a reset link proves control of the inbox.
-    await withRole("service_role", null, (c) =>
-      c.query("UPDATE auth.users SET email_confirmed_at = COALESCE(email_confirmed_at, now()) WHERE id = $1", [
-        consumed.userId,
-      ]),
+  } else {
+    // signup_confirm — and recovery: clicking a reset link proves
+    // control of the inbox, so it confirms the address too.
+    await asService((db) =>
+      db
+        .updateTable("auth.users")
+        .set({ email_confirmed_at: sql<string>`COALESCE(email_confirmed_at, now())` })
+        .where("id", "=", consumed.userId)
+        .execute(),
     );
   }
   return createSession(consumed.userId, meta);
@@ -264,8 +282,12 @@ export async function updateUser(
       throw new AuthFailure("same_password", 422, t("samePassword"));
     }
     const hash = await hashPassword(input.password as string);
-    await withRole("service_role", null, (c) =>
-      c.query("UPDATE auth.users SET encrypted_password = $2, updated_at = now() WHERE id = $1", [userId, hash]),
+    await asService((db) =>
+      db
+        .updateTable("auth.users")
+        .set({ encrypted_password: hash, updated_at: sql<string>`now()` })
+        .where("id", "=", userId)
+        .execute(),
     );
     // A password change signs out every other device.
     await revokeAllSessions(userId, sessionId);
@@ -275,11 +297,16 @@ export async function updateUser(
     if (!input.data || typeof input.data !== "object" || Array.isArray(input.data)) {
       throw new AuthFailure("validation_failed", 400, t("invalidData"));
     }
-    await withRole("service_role", null, (c) =>
-      c.query(
-        "UPDATE auth.users SET raw_user_meta_data = raw_user_meta_data || $2::jsonb, updated_at = now() WHERE id = $1",
-        [userId, JSON.stringify(input.data)],
-      ),
+    const patch = JSON.stringify(input.data);
+    await asService((db) =>
+      db
+        .updateTable("auth.users")
+        .set({
+          raw_user_meta_data: sql`raw_user_meta_data || ${patch}::jsonb`,
+          updated_at: sql<string>`now()`,
+        })
+        .where("id", "=", userId)
+        .execute(),
     );
   }
 
@@ -295,8 +322,12 @@ export async function updateUser(
         await sendAuthEmail("emailChange", email, callbackLink("email_change", token, "/settings"));
         emailChangePending = true;
       } else {
-        await withRole("service_role", null, (c) =>
-          c.query("UPDATE auth.users SET email = $2, updated_at = now() WHERE id = $1", [userId, email]),
+        await asService((db) =>
+          db
+            .updateTable("auth.users")
+            .set({ email, updated_at: sql<string>`now()` })
+            .where("id", "=", userId)
+            .execute(),
         );
       }
     }

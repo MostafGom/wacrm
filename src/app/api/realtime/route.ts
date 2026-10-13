@@ -14,7 +14,7 @@
 // ============================================================
 
 import { SESSION_COOKIE, validateSession } from '@/lib/auth/session'
-import { withRole } from '@/lib/db/tx'
+import { asUser } from '@/server/db'
 import { getHub, type Subscriber } from '@/lib/realtime/hub'
 
 export const runtime = 'nodejs'
@@ -33,12 +33,13 @@ export async function GET(request: Request) {
   const session = await validateSession(token)
   if (!session) return new Response('Not signed in', { status: 401 })
 
-  const accountId = await withRole('authenticated', session.user.id, async (c) => {
-    const r = await c.query<{ account_id: string | null }>(
-      'SELECT account_id FROM public.profiles WHERE user_id = $1',
-      [session.user.id],
-    )
-    return r.rows[0]?.account_id ?? null
+  const accountId = await asUser(session.user.id, async (db) => {
+    const row = await db
+      .selectFrom('profiles')
+      .select('account_id')
+      .where('user_id', '=', session.user.id)
+      .executeTakeFirst()
+    return row?.account_id ?? null
   })
   if (!accountId) return new Response('No account', { status: 403 })
 

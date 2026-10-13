@@ -3,36 +3,38 @@
 // components. Reads the caller's profile + account in one round
 // trip and verifies role on demand.
 //
-// IMPORTANT: this module is server-only. It imports the Supabase
-// SSR client (`@/lib/supabase/server`), which reads `next/headers`
-// cookies. Importing it from a client component will fail at
-// build time with the standard Next.js "You're importing a
-// component that needs `next/headers`" error — that's the
-// boundary check; we don't need the `server-only` package.
+// IMPORTANT: this module is server-only. It reads `next/headers`
+// cookies and the database. Importing it from a client component
+// fails at build time — that's the boundary check; we don't need the
+// `server-only` package.
 //
 // Calling convention
 // ------------------
-// API routes don't need to redo `supabase.auth.getUser()` — they
-// receive a fully-loaded context from `requireRole`:
-//
 //   try {
 //     const ctx = await requireRole("admin");
-//     // ctx.supabase — the SSR client (RLS scoped to this user)
-//     // ctx.userId  — auth.uid()
-//     // ctx.accountId / ctx.role / ctx.account
+//     // ctx.userId / ctx.accountId / ctx.role / ctx.account
+//     const rows = await asUser(ctx.userId, (db) => repo.list(db, ctx.accountId));
 //   } catch (err) {
-//     return errorResponse(err); // see toErrorResponse() below
+//     return toErrorResponse(err);
 //   }
+//
+// `asUser` (src/server/db) runs the query as `authenticated` with
+// auth.uid() = ctx.userId, so RLS backs up the explicit account filter.
 // ============================================================
 
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@/lib/db";
 
 import { createClient } from "@/lib/supabase/server";
+import { asUser } from "@/server/db";
+import { getAccountSummary, getProfileByUserId } from "@/server/repos/profiles";
+import { getServerSession } from "./server-session";
 import { hasMinRole, isAccountRole, type AccountRole } from "./roles";
 import { getT } from "@/lib/i18n/translate";
+import { pgCode } from "@/server/db/errors";
 
 const t = getT("LibErrors.auth");
+const tApi = getT("Api.common");
 
 // ------------------------------------------------------------
 // Errors
@@ -46,6 +48,22 @@ export class UnauthorizedError extends Error {
   constructor(message = t("unauthorized")) {
     super(message);
     this.name = "UnauthorizedError";
+  }
+}
+
+/**
+ * A deliberate non-2xx answer from a route / service (404 not found,
+ * 409 conflict, 400 validation...). `message` is shown to the user, so
+ * pass a translated string.
+ */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
   }
 }
 
@@ -73,6 +91,14 @@ export function toErrorResponse(err: unknown): NextResponse {
   if (err instanceof UnauthorizedError || err instanceof ForbiddenError) {
     return NextResponse.json({ error: err.message }, { status: err.status });
   }
+  if (err instanceof HttpError) {
+    return NextResponse.json({ error: err.message, ...(err.code ? { code: err.code } : {}) }, { status: err.status });
+  }
+  // Malformed id in a path / body (e.g. "abc" for a uuid column): the
+  // caller's fault, not a server error.
+  if (pgCode(err) === "22P02") {
+    return NextResponse.json({ error: tApi("invalidRequestBody") }, { status: 400 });
+  }
   console.error("[toErrorResponse] uncategorized error:", err);
   return NextResponse.json({ error: t("internal") }, { status: 500 });
 }
@@ -82,7 +108,10 @@ export function toErrorResponse(err: unknown): NextResponse {
 // ------------------------------------------------------------
 
 export interface AccountContext {
-  /** Supabase SSR client, RLS scoped to the calling user. */
+  /**
+   * @deprecated Transitional supabase-js-shaped client (RLS scoped to
+   * the caller). Use `asUser(ctx.userId, db => ...)` with a repository.
+   */
   supabase: SupabaseClient;
   /** `auth.uid()` for the caller. Always defined when this resolves. */
   userId: string;
@@ -107,58 +136,36 @@ export interface AccountContext {
  * minimum-role check — it's a thin wrapper over this.
  */
 export async function getCurrentAccount(): Promise<AccountContext> {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-    error: userErr,
-  } = await supabase.auth.getUser();
-  if (userErr || !user) {
+  const session = await getServerSession();
+  if (!session) {
     throw new UnauthorizedError();
   }
+  const userId = session.user.id;
 
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("account_id, account_role")
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  if (error) {
+  let loaded;
+  try {
+    loaded = await asUser(userId, async (db) => {
+      const profile = await getProfileByUserId(db, userId);
+      const account = profile?.account_id ? await getAccountSummary(db, profile.account_id) : null;
+      return { profile, account };
+    });
+  } catch (error) {
     console.error("[getCurrentAccount] profile fetch error:", error);
     throw new ForbiddenError(t("loadContext"));
   }
-  if (!data || !data.account_id || !data.account_role) {
+
+  const { profile, account } = loaded;
+  if (!profile || !profile.account_id || !profile.account_role) {
     // Pre-migration profile, or a manual insert that skipped the
     // signup trigger. The user is authenticated but the app has
     // no way to scope their queries — treat as forbidden.
     throw new ForbiddenError(t("notLinked"));
   }
-  if (!isAccountRole(data.account_role)) {
+  if (!isAccountRole(profile.account_role)) {
     // The DB enum should make this impossible, but a future
     // migration that broadens the enum without updating TS would
     // hit this — surface it rather than silently widening.
-    throw new ForbiddenError(`Unknown account role: ${data.account_role}`);
-  }
-
-  // Load the account with a plain point lookup by id rather than an
-  // embedded FK join (`account:accounts!inner(...)`). The embed forces
-  // PostgREST to resolve the profiles.account_id → accounts.id
-  // relationship from its schema cache; when that cache is stale — a
-  // common Supabase state right after a migration adds the FK, or when
-  // migrations are applied out of band — the embed fails hard with
-  // PGRST200 ("could not find a relationship … in the schema cache")
-  // and takes down the entire account context (issue #294). A lookup by
-  // id needs no relationship inference and is gated by the same accounts
-  // RLS, so it stays robust against cache staleness and older schemas.
-  const { data: account, error: accountErr } = await supabase
-    .from("accounts")
-    .select("id, name")
-    .eq("id", data.account_id)
-    .maybeSingle();
-
-  if (accountErr) {
-    console.error("[getCurrentAccount] account fetch error:", accountErr);
-    throw new ForbiddenError(t("loadContext"));
+    throw new ForbiddenError(`Unknown account role: ${profile.account_role}`);
   }
   if (!account) {
     // account_id points at no readable account row — orphaned profile
@@ -167,10 +174,10 @@ export async function getCurrentAccount(): Promise<AccountContext> {
   }
 
   return {
-    supabase,
-    userId: user.id,
-    accountId: data.account_id,
-    role: data.account_role,
+    supabase: await createClient(),
+    userId,
+    accountId: profile.account_id,
+    role: profile.account_role,
     account: { id: account.id, name: account.name },
   };
 }

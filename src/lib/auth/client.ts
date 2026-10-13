@@ -1,5 +1,11 @@
 // ============================================================
-// Browser `supabase.auth` facade over /api/auth/*.
+// Browser auth client over /api/auth/*:
+//
+//   import { getAuthClient } from '@/lib/auth/client'
+//   await getAuthClient().signInWithPassword({ email, password })
+//
+// (Method names and result shapes follow supabase-js so the existing
+// pages kept working through the migration.)
 //
 // The session itself is an HttpOnly cookie the browser can't read;
 // this keeps a small in-memory copy of the current user (fetched from
@@ -146,4 +152,12 @@ export function createAuthClient(): AuthApi {
       return { data: data ? { mailEnabled: data.mail_enabled } : null, error };
     },
   };
+}
+
+let singleton: AuthApi | null = null;
+
+/** One auth client (and one cached session) per browser tab. */
+export function getAuthClient(): AuthApi {
+  singleton ??= createAuthClient();
+  return singleton;
 }

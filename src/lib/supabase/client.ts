@@ -5,7 +5,7 @@
 //   .storage          → /api/storage/*
 //   .channel()        → SSE stream at /api/realtime
 import { QueryBuilder, makeRpc } from '@/lib/db/builder'
-import { createAuthClient } from '@/lib/db/auth-client'
+import { getAuthClient } from '@/lib/auth/client'
 import { httpExecutor } from '@/lib/db/browser'
 import type { DbClient } from '@/lib/db/types'
 import { createChannel, removeChannel } from '@/lib/realtime/client'
@@ -20,7 +20,7 @@ export function createClient(): DbClient {
   browserClient = {
     from: (table: string) => new QueryBuilder(table, httpExecutor),
     rpc: makeRpc(httpExecutor),
-    auth: createAuthClient(),
+    auth: getAuthClient(),
     storage: createBrowserStorage(),
     channel: createChannel,
     removeChannel,
