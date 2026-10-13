@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
+import { getContactDetail, listContacts, listCustomFields } from '@/lib/contacts/contacts-api';
 import { Contact, CustomField, MessageTemplate } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -90,32 +90,24 @@ export function Step3Personalize({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const supabase = createClient();
       const [fieldsRes, contactRes] = await Promise.all([
-        supabase.from('custom_fields').select('*').order('field_name'),
-        supabase
-          .from('contacts')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle(),
+        listCustomFields(),
+        // Newest contact (the list is ordered created_at desc).
+        listContacts({ page: 0, pageSize: 1 }),
       ]);
       if (cancelled) return;
 
-      setCustomFields(fieldsRes.data ?? []);
+      setCustomFields(fieldsRes.data?.fields ?? []);
       setLoadingFields(false);
 
-      const contact = contactRes.data ?? null;
+      const contact = contactRes.data?.contacts[0] ?? null;
       setFirstContact(contact);
 
       if (contact) {
-        const { data: customVals } = await supabase
-          .from('contact_custom_values')
-          .select('custom_field_id, value')
-          .eq('contact_id', contact.id);
+        const { data: detail } = await getContactDetail(contact.id);
         if (!cancelled) {
           const map = new Map<string, string>();
-          for (const row of customVals ?? []) {
+          for (const row of detail?.custom_values ?? []) {
             map.set(row.custom_field_id, row.value ?? '');
           }
           setFirstContactCustomValues(map);

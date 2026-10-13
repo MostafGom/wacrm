@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { saveBroadcastDraft } from '@/lib/broadcasts/broadcasts-api';
 import { useAuth } from '@/hooks/use-auth';
 import { toast } from 'sonner';
 import { MessageTemplate } from '@/types';
@@ -87,38 +87,20 @@ export default function NewBroadcastPage() {
       toast.error(t('toastGiveName'));
       return;
     }
-    const supabase = createClient();
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    const user = session?.user;
-    if (!user) {
-      toast.error(t('toastNotSignedIn'));
-      return;
-    }
     if (!accountId) {
       toast.error(t('toastNotLinked'));
       return;
     }
 
-    const { error } = await supabase.from('broadcasts').insert({
-      user_id: user.id,
-      account_id: accountId,
+    const { error } = await saveBroadcastDraft({
       name: name.trim(),
       template_name: template.name,
       template_language: template.language ?? 'en_US',
       template_variables: variables,
-      audience_filter: {
+      audience: {
         type: audience.type,
         tagIds: audience.tagIds,
       },
-      status: 'draft',
-      total_recipients: 0,
-      sent_count: 0,
-      delivered_count: 0,
-      read_count: 0,
-      replied_count: 0,
-      failed_count: 0,
     });
 
     if (error) {

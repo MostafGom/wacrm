@@ -3,7 +3,7 @@ import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
-import { resolveTemplateRow } from '@/lib/whatsapp/template-body'
+import { pickTemplateRow } from '@/lib/whatsapp/template-body'
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -16,6 +16,8 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limit'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import { getWhatsappConfig, listTemplatesByName } from '@/server/repos/templates'
 
 const t = getT('Api')
 
@@ -75,7 +77,7 @@ export async function POST(request: Request) {
     // to arbitrary phone numbers from the account's WhatsApp number.
     // Nothing about that is recoverable after the fact, so the check has
     // to happen here.
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { accountId, userId } = await requireRole('agent')
 
     // Per-user broadcast budget. Note: this limits how often a user
     // can *start* a campaign, not how many messages go out inside
@@ -123,13 +125,14 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
+    // Config + the template's local rows in one short read; the Meta
+    // calls below run outside any transaction.
+    const { config, templateRows } = await asUser(userId, async (db) => ({
+      config: await getWhatsappConfig(db, accountId),
+      templateRows: await listTemplatesByName(db, accountId, String(template_name)),
+    }))
 
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
         {
           error:
@@ -143,15 +146,10 @@ export async function POST(request: Request) {
 
     // Load the template row once so sendTemplateMessage can build
     // header + button components on each iteration. Loading inside
-    // the loop would N+1 against Supabase for every recipient.
+    // the loop would N+1 against the database for every recipient.
     // Guard against a malformed local row crashing every send in
     // the loop with the same opaque TypeError — fail loudly once.
-    const resolvedTemplate = await resolveTemplateRow(
-      supabase,
-      accountId,
-      template_name,
-      template_language,
-    )
+    const resolvedTemplate = pickTemplateRow(templateRows, template_language)
     if (resolvedTemplate.malformed) {
       return NextResponse.json(
         {

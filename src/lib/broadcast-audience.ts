@@ -1,7 +1,6 @@
-import type { SupabaseClient } from '@/lib/db';
-
-import { fetchAllInChunks, fetchAllPages } from '@/lib/supabase/paged-query';
-import type { Contact } from '@/types';
+// Broadcast audience — the shape the wizard builds, plus pure helpers.
+// Resolution against the database lives server-side in
+// src/server/repos/broadcast-audience.ts (behind /api/broadcasts).
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
 
@@ -26,153 +25,75 @@ export interface AudienceConfig {
   excludeTagIds?: string[];
 }
 
-async function withContext<T>(label: string, run: () => Promise<T>): Promise<T> {
-  try {
-    return await run();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to fetch ${label}: ${message}`);
-  }
+const AUDIENCE_TYPES: readonly AudienceType[] = ['all', 'tags', 'custom_field', 'csv'];
+const OPERATORS: readonly CustomFieldOperator[] = ['is', 'is_not', 'contains'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Max CSV rows one broadcast accepts (a sanity ceiling on the request body). */
+export const MAX_CSV_AUDIENCE_ROWS = 100_000;
+
+function uuidList(value: unknown): string[] | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length > 1000) return null;
+  if (!value.every((v) => typeof v === 'string' && UUID_RE.test(v))) return null;
+  return [...new Set(value as string[])];
 }
 
-export function fetchTaggedContactIds(
-  db: SupabaseClient,
-  tagIds: readonly string[],
-): Promise<Set<string>> {
-  return withContext('contact tags', async () => {
-    const rows = await fetchAllInChunks<{ contact_id: string }, string>(
-      tagIds,
-      (slice, from, to) =>
-        db
-          .from('contact_tags')
-          .select('contact_id')
-          .in('tag_id', slice)
-          .order('id')
-          .range(from, to),
-    );
-    return new Set(rows.map((row) => row.contact_id));
-  });
-}
+/**
+ * Validate an audience posted by the browser. Returns null when the
+ * shape is invalid (the route answers 400). Unknown keys are dropped.
+ */
+export function parseAudienceConfig(raw: unknown): AudienceConfig | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const a = raw as Record<string, unknown>;
+  if (!AUDIENCE_TYPES.includes(a.type as AudienceType)) return null;
 
-export function fetchCustomFieldContactIds(
-  db: SupabaseClient,
-  filter: CustomFieldFilter,
-): Promise<Set<string>> {
-  return withContext('custom field matches', async () => {
-    const { fieldId, operator, value } = filter;
-    const rows = await fetchAllPages<{ contact_id: string }>((from, to) => {
-      let query = db
-        .from('contact_custom_values')
-        .select('contact_id')
-        .eq('custom_field_id', fieldId);
-      if (operator === 'is') query = query.eq('value', value);
-      else if (operator === 'is_not') query = query.neq('value', value);
-      else query = query.ilike('value', `%${value}%`);
-      return query.order('id').range(from, to);
-    });
-    return new Set(rows.map((row) => row.contact_id));
-  });
-}
+  const tagIds = uuidList(a.tagIds);
+  const excludeTagIds = uuidList(a.excludeTagIds);
+  if (tagIds === null || excludeTagIds === null) return null;
 
-export function fetchContactsByIds(
-  db: SupabaseClient,
-  ids: readonly string[],
-): Promise<Contact[]> {
-  return withContext('contacts', () =>
-    fetchAllInChunks<Contact, string>(ids, (slice, from, to) =>
-      db.from('contacts').select('*').in('id', slice).order('id').range(from, to),
-    ),
-  );
-}
+  const out: AudienceConfig = { type: a.type as AudienceType };
+  if (tagIds) out.tagIds = tagIds;
+  if (excludeTagIds) out.excludeTagIds = excludeTagIds;
 
-export function fetchAllContacts(db: SupabaseClient): Promise<Contact[]> {
-  return withContext('contacts', () =>
-    fetchAllPages<Contact>((from, to) =>
-      db.from('contacts').select('*').order('id').range(from, to),
-    ),
-  );
-}
-
-async function fetchExcludedIds(
-  db: SupabaseClient,
-  audience: AudienceConfig,
-): Promise<Set<string>> {
-  if (!audience.excludeTagIds || audience.excludeTagIds.length === 0) {
-    return new Set();
-  }
-  return fetchTaggedContactIds(db, audience.excludeTagIds);
-}
-
-function hasCustomFieldFilter(
-  audience: AudienceConfig,
-): audience is AudienceConfig & { customField: CustomFieldFilter } {
-  return Boolean(audience.customField?.fieldId);
-}
-
-async function fetchAudienceContactIds(
-  db: SupabaseClient,
-  audience: AudienceConfig,
-): Promise<Set<string> | null> {
-  if (audience.type === 'tags' && audience.tagIds && audience.tagIds.length > 0) {
-    return fetchTaggedContactIds(db, audience.tagIds);
-  }
-  if (audience.type === 'custom_field' && hasCustomFieldFilter(audience)) {
-    return fetchCustomFieldContactIds(db, audience.customField);
-  }
-  return null;
-}
-
-export async function resolveAudienceContacts(
-  db: SupabaseClient,
-  audience: AudienceConfig,
-  resolveCsv: (rows: CsvAudienceRow[]) => Promise<Contact[]>,
-): Promise<Contact[]> {
-  const excluded = await fetchExcludedIds(db, audience);
-  const keep = (contact: Contact) => !excluded.has(contact.id);
-
-  if (audience.type === 'all') {
-    return (await fetchAllContacts(db)).filter(keep);
-  }
-  if (audience.type === 'csv') {
-    if (!audience.csvContacts) return [];
-    return (await resolveCsv(audience.csvContacts)).filter(keep);
+  if (a.customField !== undefined && a.customField !== null) {
+    const cf = a.customField as Record<string, unknown>;
+    if (typeof cf !== 'object' || typeof cf.fieldId !== 'string' || typeof cf.value !== 'string') return null;
+    if (!OPERATORS.includes(cf.operator as CustomFieldOperator)) return null;
+    // An unset field id means "not configured yet" (the wizard's initial
+    // state) — keep it so the count answers null rather than 400.
+    if (cf.fieldId !== '' && !UUID_RE.test(cf.fieldId)) return null;
+    out.customField = {
+      fieldId: cf.fieldId,
+      operator: cf.operator as CustomFieldOperator,
+      value: cf.value,
+    };
   }
 
-  const ids = await fetchAudienceContactIds(db, audience);
-  if (!ids) return [];
-  const wanted = [...ids].filter((id) => !excluded.has(id));
-  if (wanted.length === 0) return [];
-  return fetchContactsByIds(db, wanted);
+  if (a.csvContacts !== undefined && a.csvContacts !== null) {
+    if (!Array.isArray(a.csvContacts) || a.csvContacts.length > MAX_CSV_AUDIENCE_ROWS) return null;
+    const rows: CsvAudienceRow[] = [];
+    for (const r of a.csvContacts as unknown[]) {
+      const row = r as Record<string, unknown>;
+      if (!row || typeof row.phone !== 'string') return null;
+      rows.push({
+        phone: row.phone.slice(0, 64),
+        ...(typeof row.name === 'string' ? { name: row.name.slice(0, 200) } : {}),
+      });
+    }
+    out.csvContacts = rows;
+  }
+
+  return out;
 }
 
-export async function countAudience(
-  db: SupabaseClient,
-  audience: AudienceConfig,
-): Promise<number | null> {
-  if (audience.type === 'csv') {
-    return audience.csvContacts && audience.csvContacts.length > 0
-      ? audience.csvContacts.length
-      : null;
-  }
-
-  if (audience.type === 'all') {
-    const { count, error } = await db
-      .from('contacts')
-      .select('id', { count: 'exact', head: true });
-    if (error) throw new Error(`Failed to count contacts: ${error.message}`);
-    const total = count ?? 0;
-    const excluded = await fetchExcludedIds(db, audience);
-    return Math.max(0, total - excluded.size);
-  }
-
-  if (audience.type === 'custom_field' && !audience.customField?.value) {
-    return null;
-  }
-
-  const ids = await fetchAudienceContactIds(db, audience);
-  if (!ids) return null;
-  const excluded = await fetchExcludedIds(db, audience);
-  let size = 0;
-  for (const id of ids) if (!excluded.has(id)) size++;
-  return size;
+/**
+ * CSV audiences are sized from the uploaded rows without a query;
+ * null when no file is loaded. Undefined for every other type.
+ */
+export function localAudienceCount(audience: AudienceConfig): number | null | undefined {
+  if (audience.type !== 'csv') return undefined;
+  return audience.csvContacts && audience.csvContacts.length > 0
+    ? audience.csvContacts.length
+    : null;
 }

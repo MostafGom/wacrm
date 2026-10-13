@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { countAudience, type AudienceConfig } from '@/lib/broadcast-audience';
-import { createClient } from '@/lib/supabase/client';
+import type { AudienceConfig } from '@/lib/broadcast-audience';
+import { countAudience } from '@/lib/broadcasts/broadcasts-api';
 import { MessageTemplate } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,7 +50,7 @@ export function Step4ScheduleSend({
     async function calculateReach() {
       setLoadingReach(true);
       try {
-        setEstimatedReach((await countAudience(createClient(), audience)) ?? 0);
+        setEstimatedReach((await countAudience(audience)) ?? 0);
       } catch {
         setEstimatedReach(0);
       } finally {

@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { createClient } from '@/lib/supabase/client';
-import { countAudience } from '@/lib/broadcast-audience';
+import { countAudience } from '@/lib/broadcasts/broadcasts-api';
+import { listCustomFields, listTags } from '@/lib/contacts/contacts-api';
 import { parseBroadcastCsv } from '@/lib/broadcast-csv';
 import { CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
@@ -112,9 +112,8 @@ export function Step2SelectAudience({
     async function fetchTags() {
       setLoadingTags(true);
       try {
-        const supabase = createClient();
-        const { data } = await supabase.from('tags').select('*').order('name');
-        setTags(data ?? []);
+        const { data } = await listTags();
+        setTags(data?.tags ?? []);
       } finally {
         setLoadingTags(false);
       }
@@ -128,12 +127,8 @@ export function Step2SelectAudience({
     async function fetchFields() {
       setLoadingFields(true);
       try {
-        const supabase = createClient();
-        const { data } = await supabase
-          .from('custom_fields')
-          .select('*')
-          .order('field_name');
-        setCustomFields(data ?? []);
+        const { data } = await listCustomFields();
+        setCustomFields(data?.fields ?? []);
       } finally {
         setLoadingFields(false);
       }
@@ -145,7 +140,7 @@ export function Step2SelectAudience({
     setLoadingCount(true);
     try {
       setEstimatedCount(
-        await countAudience(createClient(), {
+        await countAudience({
           type: audience.type,
           tagIds: audience.tagIds,
           customField: audience.customField,

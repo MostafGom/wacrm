@@ -9,6 +9,13 @@ import { decrypt } from '@/lib/whatsapp/encryption'
 import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
 import type { TemplateButton, TemplateSampleValues } from '@/types'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import {
+  findTemplateId,
+  getWhatsappConfig,
+  insertTemplate,
+  updateTemplate,
+} from '@/server/repos/templates'
 
 const t = getT('Api')
 
@@ -136,15 +143,11 @@ export async function POST() {
     // settings-class data: `canEditSettings` and the message_templates
     // insert/update RLS policies (migration 017) both require 'admin'.
     // Resolving account_id off the profile only proved membership.
-    const { supabase, accountId, userId } = await requireRole('admin')
+    const { accountId, userId } = await requireRole('admin')
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
+    const config = await asUser(userId, (db) => getWhatsappConfig(db, accountId))
 
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
         {
           error:
@@ -242,50 +245,26 @@ export async function POST() {
         updated_at: new Date().toISOString(),
       }
 
-      const { data: existing, error: lookupErr } = await supabase
-        .from('message_templates')
-        .select('id')
-        .eq('account_id', accountId)
-        .eq('name', t.name)
-        .eq('language', t.language)
-        .maybeSingle()
-
-      if (lookupErr) {
+      // One short transaction per template, after every Meta page has
+      // been fetched — a failing row is reported and the rest still sync.
+      try {
+        const outcome = await asUser(userId, async (db) => {
+          const existingId = await findTemplateId(db, accountId, t.name, t.language)
+          if (existingId) {
+            await updateTemplate(db, accountId, existingId, row)
+            return 'updated' as const
+          }
+          await insertTemplate(db, row)
+          return 'inserted' as const
+        })
+        if (outcome === 'updated') updated++
+        else inserted++
+      } catch (err) {
         errors.push({
           name: t.name,
           language: t.language,
-          message: lookupErr.message,
+          message: err instanceof Error ? err.message : String(err),
         })
-        continue
-      }
-
-      if (existing?.id) {
-        const { error: updErr } = await supabase
-          .from('message_templates')
-          .update(row)
-          .eq('id', existing.id)
-        if (updErr) {
-          errors.push({
-            name: t.name,
-            language: t.language,
-            message: updErr.message,
-          })
-        } else {
-          updated++
-        }
-      } else {
-        const { error: insErr } = await supabase
-          .from('message_templates')
-          .insert(row)
-        if (insErr) {
-          errors.push({
-            name: t.name,
-            language: t.language,
-            message: insErr.message,
-          })
-        } else {
-          inserted++
-        }
       }
     }
 

@@ -17,6 +17,13 @@ import {
 import { buildMetaTemplatePayload } from '@/lib/whatsapp/template-components'
 import { ensureMediaHeaderHandle } from '@/lib/whatsapp/template-header-handle'
 import { getT } from '@/lib/i18n/translate'
+import { asUser } from '@/server/db'
+import {
+  deleteTemplate,
+  getTemplateMeta,
+  getWhatsappConfig,
+  updateTemplate,
+} from '@/server/repos/templates'
 
 const t = getT('Api')
 
@@ -47,7 +54,7 @@ const EDITABLE_STATUSES = new Set(['APPROVED', 'REJECTED', 'PAUSED'])
 
 // uuid v4 plus the looser shape Postgres gen_random_uuid emits.
 // We don't need exhaustive RFC parsing — just enough to reject
-// "../etc/passwd"-style payloads before they hit Supabase.
+// "../etc/passwd"-style payloads before they hit the database.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -72,7 +79,7 @@ export async function PATCH(
     }
     // Editing a template pushes a component replacement to Meta before
     // anything is written locally, so the role has to be checked here.
-    const { supabase, accountId } = await requireRole('admin')
+    const { userId, accountId } = await requireRole('admin')
 
     let payload: TemplatePayload
     try {
@@ -81,15 +88,9 @@ export async function PATCH(
       return NextResponse.json({ error: t('templates.invalidJsonBody') }, { status: 400 })
     }
 
-    // RLS handles ownership, but we need the existing row to read
-    // meta_template_id and status — fetch explicitly.
-    const { data: existing, error: lookupErr } = await supabase
-      .from('message_templates')
-      .select('id, name, status, meta_template_id, language')
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .maybeSingle()
-    if (lookupErr || !existing) {
+    // We need the existing row to read meta_template_id and status.
+    const existing = await asUser(userId, (db) => getTemplateMeta(db, accountId, id))
+    if (!existing) {
       return NextResponse.json({ error: t('templates.notFound') }, { status: 404 })
     }
 
@@ -103,7 +104,7 @@ export async function PATCH(
       )
     }
 
-    if (!EDITABLE_STATUSES.has(existing.status)) {
+    if (!EDITABLE_STATUSES.has(existing.status ?? '')) {
       return NextResponse.json(
         {
           error: t('templates.statusNotEditable', { status: String(existing.status) }),
@@ -132,12 +133,8 @@ export async function PATCH(
     }
 
     if (!isDryRun()) {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config) {
+      const config = await asUser(userId, (db) => getWhatsappConfig(db, accountId))
+      if (!config) {
         return NextResponse.json(
           { error: t('common.whatsappNotConfiguredDot') },
           { status: 400 },
@@ -166,45 +163,43 @@ export async function PATCH(
         })
       } catch (e) {
         const message = e instanceof Error ? e.message : t('templates.metaEditFailed')
-        await supabase
-          .from('message_templates')
-          .update({
+        await asUser(userId, (db) =>
+          updateTemplate(db, accountId, id, {
             submission_error: message,
             last_submitted_at: new Date().toISOString(),
-          })
-          .eq('id', id)
-          .eq('account_id', accountId)
+          }),
+        ).catch((err) => console.error('Failed to record template edit error:', err))
         return NextResponse.json({ error: message }, { status: 502 })
       }
     }
 
     // Meta accepted the edit — status flips back to PENDING for review.
-    const { data: row, error: updErr } = await supabase
-      .from('message_templates')
-      .update({
-        category: payload.category,
-        header_type: payload.header_type ?? null,
-        header_content: payload.header_content ?? null,
-        header_media_url: payload.header_media_url ?? null,
-        header_handle: payload.header_handle ?? null,
-        body_text: payload.body_text,
-        footer_text: payload.footer_text ?? null,
-        buttons: payload.buttons ?? null,
-        sample_values: payload.sample_values ?? null,
-        status: 'PENDING',
-        submission_error: null,
-        rejection_reason: null,
-        last_submitted_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .select()
-      .single()
-
-    if (updErr) {
+    let row
+    try {
+      row = await asUser(userId, (db) =>
+        updateTemplate(db, accountId, id, {
+          category: payload.category,
+          header_type: payload.header_type ?? null,
+          header_content: payload.header_content ?? null,
+          header_media_url: payload.header_media_url ?? null,
+          header_handle: payload.header_handle ?? null,
+          body_text: payload.body_text,
+          footer_text: payload.footer_text ?? null,
+          buttons: payload.buttons ?? null,
+          sample_values: payload.sample_values ?? null,
+          status: 'PENDING',
+          submission_error: null,
+          rejection_reason: null,
+          last_submitted_at: new Date().toISOString(),
+        }),
+      )
+      if (!row) throw new Error(t('templates.notFound'))
+    } catch (updErr) {
       return NextResponse.json(
         {
-          error: t('templates.editedSaveFailed', { message: updErr.message }),
+          error: t('templates.editedSaveFailed', {
+            message: updErr instanceof Error ? updErr.message : String(updErr),
+          }),
         },
         { status: 500 },
       )
@@ -244,25 +239,16 @@ export async function DELETE(
     }
     // Deleting removes the template on Meta first; same reasoning as
     // the PATCH handler above.
-    const { supabase, accountId } = await requireRole('admin')
+    const { userId, accountId } = await requireRole('admin')
 
-    const { data: existing, error: lookupErr } = await supabase
-      .from('message_templates')
-      .select('id, name, meta_template_id')
-      .eq('id', id)
-      .eq('account_id', accountId)
-      .maybeSingle()
-    if (lookupErr || !existing) {
+    const existing = await asUser(userId, (db) => getTemplateMeta(db, accountId, id))
+    if (!existing) {
       return NextResponse.json({ error: t('templates.notFound') }, { status: 404 })
     }
 
     if (existing.meta_template_id && !isDryRun()) {
-      const { data: config, error: configError } = await supabase
-        .from('whatsapp_config')
-        .select('*')
-        .eq('account_id', accountId)
-        .single()
-      if (configError || !config || !config.waba_id) {
+      const config = await asUser(userId, (db) => getWhatsappConfig(db, accountId))
+      if (!config || !config.waba_id) {
         return NextResponse.json(
           { error: t('templates.notConfiguredDelete') },
           { status: 400 },
@@ -282,15 +268,14 @@ export async function DELETE(
       }
     }
 
-    const { error: delErr } = await supabase
-      .from('message_templates')
-      .delete()
-      .eq('id', id)
-      .eq('account_id', accountId)
-    if (delErr) {
+    try {
+      await asUser(userId, (db) => deleteTemplate(db, accountId, id))
+    } catch (delErr) {
       return NextResponse.json(
         {
-          error: t('templates.deletedLocalFailed', { message: delErr.message }),
+          error: t('templates.deletedLocalFailed', {
+            message: delErr instanceof Error ? delErr.message : String(delErr),
+          }),
         },
         { status: 500 },
       )
