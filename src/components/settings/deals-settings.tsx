@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Coins, Loader2 } from "lucide-react";
 
-import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import { setDefaultCurrency } from "@/lib/pipelines/pipelines-api";
 import { CURRENCIES } from "@/lib/currency";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -24,12 +24,12 @@ import { SettingsPanelHead } from "./settings-panel-head";
  *
  * One currency per account (issue #218): the chosen code seeds new
  * deals and formats every aggregated total. Existing deals keep their
- * own saved currency. Writes go straight to `accounts.default_currency`;
- * the `accounts_update` RLS policy (017) already restricts that to
- * admins+, so non-admins see a disabled, read-only control.
+ * own saved currency. Writes go to `accounts.default_currency` through
+ * PATCH /api/deals/default-currency, which is admin+ like the
+ * `accounts_update` RLS policy (017), so non-admins see a disabled,
+ * read-only control.
  */
 export function DealsSettings() {
-  const supabase = createClient();
   const {
     accountId,
     defaultCurrency,
@@ -53,10 +53,7 @@ export function DealsSettings() {
   async function handleSave() {
     if (!accountId || !dirty) return;
     setSaving(true);
-    const { error } = await supabase
-      .from("accounts")
-      .update({ default_currency: selected })
-      .eq("id", accountId);
+    const { error } = await setDefaultCurrency(selected);
     if (error) {
       toast.error(t("saveFailed"));
       setSaving(false);
