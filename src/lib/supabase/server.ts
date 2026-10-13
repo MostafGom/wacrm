@@ -1,28 +1,30 @@
-import { createServerClient } from '@supabase/ssr'
+// Session-scoped server client (route handlers, server components).
+//
+// Resolves the `wacrm_session` cookie and returns a DbClient whose
+// queries run as `authenticated` with auth.uid() = the signed-in user
+// (or as `anon` without a session), so every RLS policy applies exactly
+// as it did under Supabase. The module path is kept so existing
+// `import { createClient } from '@/lib/supabase/server'` call sites
+// work unchanged.
 import { cookies } from 'next/headers'
 
-export async function createClient() {
-  const cookieStore = await cookies()
+import { SESSION_COOKIE, validateSession, type ValidSession } from '@/lib/auth/session'
+import { createServerDb } from '@/lib/db/server-client'
+import type { DbClient } from '@/lib/db/types'
+import { userStorage } from '@/lib/storage/server'
 
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // The `setAll` method was called from a Server Component.
-            // This can be ignored if you have middleware refreshing sessions.
-          }
-        },
-      },
-    }
-  )
+export async function getServerSession(): Promise<ValidSession | null> {
+  const cookieStore = await cookies()
+  return validateSession(cookieStore.get(SESSION_COOKIE)?.value)
+}
+
+export async function createClient(): Promise<DbClient> {
+  const session = await getServerSession()
+  const userId = session?.user.id ?? null
+  return createServerDb({
+    role: userId ? 'authenticated' : 'anon',
+    userId,
+    user: session?.user ?? null,
+    storage: userStorage(userId),
+  })
 }

@@ -1,14 +1,12 @@
 // ============================================================
-// Helpers for /auth/callback — the landing route for every link
-// Supabase emails on the app's behalf (email confirmation, password
-// reset, invite, magic link).
+// Helpers for /auth/callback — the landing route for every auth link
+// the app emails (or an owner generates): email confirmation, password
+// reset, email change.
 //
 // Pure functions, kept out of the route file so they can be unit
 // tested without Next request plumbing (vitest runs `environment:
 // "node"` with no jsdom — see vitest.config.ts).
 // ============================================================
-
-import type { EmailOtpType } from '@supabase/supabase-js';
 
 /** Where a link lands when it carries no usable `next`. */
 export const DEFAULT_NEXT_PATH = '/dashboard';
@@ -21,9 +19,9 @@ export const LOGIN_PATH = '/login';
  * emitted here must get a message in `LoginPage`.
  */
 export type CallbackFailure =
-  /** Supabase itself reported the link expired (`error_code=otp_expired`). */
+  /** The link was valid once but has expired or was already used. */
   | 'link_expired'
-  /** No `code` / `token_hash` at all, a bad `type`, or the exchange failed. */
+  /** No `token` at all, or a bad `type`. */
   | 'link_invalid';
 
 const MAX_NEXT_LENGTH = 2048;
@@ -56,64 +54,33 @@ export function safeNextPath(
   return value;
 }
 
-/** Values Supabase's `verifyOtp` accepts for an emailed `token_hash`. */
-const EMAIL_OTP_TYPES: ReadonlySet<string> = new Set<EmailOtpType>([
-  'signup',
-  'invite',
-  'magiclink',
+/** Link types /auth/callback accepts (see `auth.one_time_tokens`). */
+export type EmailLinkType = 'signup_confirm' | 'recovery' | 'email_change';
+
+const EMAIL_LINK_TYPES: ReadonlySet<string> = new Set<EmailLinkType>([
+  'signup_confirm',
   'recovery',
   'email_change',
-  'email',
 ]);
 
-export function isEmailOtpType(value: string | null): value is EmailOtpType {
-  return typeof value === 'string' && EMAIL_OTP_TYPES.has(value);
+export function isEmailLinkType(value: string | null): value is EmailLinkType {
+  return value !== null && EMAIL_LINK_TYPES.has(value);
+}
+
+export interface EmailLink {
+  type: EmailLinkType;
+  token: string;
 }
 
 /**
- * The two shapes an emailed Supabase link can take by the time it hits
- * this route, or `null` when neither is present:
- *
- *   - `code`: the PKCE flow. `@supabase/ssr`'s browser client starts
- *     every sign-up / reset with a code challenge, so the default
- *     `{{ .ConfirmationURL }}` email templates redirect here with
- *     `?code=...`. Exchanged server-side via `exchangeCodeForSession`
- *     (the code verifier lives in a cookie the server can read).
- *   - `token_hash` + `type`: what a template customised to use
- *     `{{ .TokenHash }}` sends. Exchanged via `verifyOtp`. Doesn't need
- *     the verifier cookie, so it also works when the link is opened in
- *     a different browser than the one that requested it.
+ * Extract the credential from an emailed / admin-generated link:
+ * `/auth/callback?type=<type>&token=<token>&next=<path>`.
  */
-export type EmailLink =
-  | { kind: 'code'; code: string }
-  | { kind: 'token_hash'; tokenHash: string; type: EmailOtpType };
-
 export function parseEmailLink(params: URLSearchParams): EmailLink | null {
-  const code = params.get('code')?.trim();
-  if (code) return { kind: 'code', code };
-
-  const tokenHash = params.get('token_hash')?.trim();
+  const token = params.get('token')?.trim();
   const type = params.get('type');
-  if (tokenHash && isEmailOtpType(type)) {
-    return { kind: 'token_hash', tokenHash, type };
-  }
-
+  if (token && isEmailLinkType(type)) return { type, token };
   return null;
-}
-
-/**
- * Supabase reports a link it could not verify (expired, already used)
- * by redirecting to us with `error`, `error_code` and
- * `error_description` instead of a credential. Map that to the one
- * failure /login can explain precisely; everything else is generic.
- */
-export function parseSupabaseError(
-  params: URLSearchParams,
-): CallbackFailure | null {
-  const errorCode = params.get('error_code');
-  const error = params.get('error');
-  if (!errorCode && !error) return null;
-  return errorCode === 'otp_expired' ? 'link_expired' : 'link_invalid';
 }
 
 export function loginFailurePath(reason: CallbackFailure): string {

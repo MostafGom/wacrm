@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_NEXT_PATH,
-  isEmailOtpType,
+  isEmailLinkType,
   loginFailurePath,
   parseEmailLink,
-  parseSupabaseError,
   relativeRedirect,
   safeNextPath,
 } from './callback';
@@ -52,88 +51,31 @@ describe('safeNextPath', () => {
 });
 
 describe('parseEmailLink', () => {
-  it('prefers the PKCE code when present', () => {
-    expect(parseEmailLink(new URLSearchParams('code=abc123'))).toEqual({
-      kind: 'code',
-      code: 'abc123',
+  it('reads a typed one-time token', () => {
+    expect(parseEmailLink(new URLSearchParams('type=recovery&token=abc'))).toEqual({
+      type: 'recovery',
+      token: 'abc',
     });
-    // A code wins even if a token_hash also rides along.
     expect(
-      parseEmailLink(
-        new URLSearchParams('code=abc&token_hash=th&type=recovery'),
-      ),
-    ).toEqual({ kind: 'code', code: 'abc' });
+      parseEmailLink(new URLSearchParams('type=signup_confirm&token=t1&next=/dashboard')),
+    ).toEqual({ type: 'signup_confirm', token: 't1' });
   });
 
-  it('parses a token_hash link with a known type', () => {
-    expect(
-      parseEmailLink(new URLSearchParams('token_hash=th-1&type=recovery')),
-    ).toEqual({ kind: 'token_hash', tokenHash: 'th-1', type: 'recovery' });
-    expect(
-      parseEmailLink(new URLSearchParams('token_hash=th-2&type=email')),
-    ).toEqual({ kind: 'token_hash', tokenHash: 'th-2', type: 'email' });
-  });
-
-  it('returns null for a token_hash with a missing or unknown type', () => {
-    expect(parseEmailLink(new URLSearchParams('token_hash=th'))).toBeNull();
-    expect(
-      parseEmailLink(new URLSearchParams('token_hash=th&type=sms')),
-    ).toBeNull();
-    expect(
-      parseEmailLink(new URLSearchParams('token_hash=th&type=RECOVERY')),
-    ).toBeNull();
-  });
-
-  it('returns null when neither shape is present', () => {
-    expect(parseEmailLink(new URLSearchParams(''))).toBeNull();
-    expect(parseEmailLink(new URLSearchParams('next=/dashboard'))).toBeNull();
-    expect(parseEmailLink(new URLSearchParams('code='))).toBeNull();
-    expect(parseEmailLink(new URLSearchParams('code=%20%20'))).toBeNull();
+  it('rejects a missing token or an unknown type', () => {
+    expect(parseEmailLink(new URLSearchParams('type=recovery'))).toBeNull();
+    expect(parseEmailLink(new URLSearchParams('type=recovery&token=%20'))).toBeNull();
+    expect(parseEmailLink(new URLSearchParams('type=magiclink&token=abc'))).toBeNull();
+    expect(parseEmailLink(new URLSearchParams('code=abc'))).toBeNull();
   });
 });
 
-describe('isEmailOtpType', () => {
-  it('accepts exactly the email OTP types verifyOtp knows', () => {
-    for (const t of [
-      'signup',
-      'invite',
-      'magiclink',
-      'recovery',
-      'email_change',
-      'email',
-    ]) {
-      expect(isEmailOtpType(t)).toBe(true);
+describe('isEmailLinkType', () => {
+  it('accepts exactly the link types the token table stores', () => {
+    for (const t of ['signup_confirm', 'recovery', 'email_change']) {
+      expect(isEmailLinkType(t)).toBe(true);
     }
-    expect(isEmailOtpType('sms')).toBe(false);
-    expect(isEmailOtpType('phone_change')).toBe(false);
-    expect(isEmailOtpType(null)).toBe(false);
-  });
-});
-
-describe('parseSupabaseError', () => {
-  it('maps an expired-link report to link_expired', () => {
-    expect(
-      parseSupabaseError(
-        new URLSearchParams(
-          'error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired',
-        ),
-      ),
-    ).toBe('link_expired');
-  });
-
-  it('maps any other upstream error to link_invalid', () => {
-    expect(
-      parseSupabaseError(new URLSearchParams('error=server_error')),
-    ).toBe('link_invalid');
-    expect(
-      parseSupabaseError(
-        new URLSearchParams('error=access_denied&error_code=otp_disabled'),
-      ),
-    ).toBe('link_invalid');
-  });
-
-  it('returns null when Supabase reported nothing', () => {
-    expect(parseSupabaseError(new URLSearchParams('code=abc'))).toBeNull();
+    expect(isEmailLinkType('signup')).toBe(false);
+    expect(isEmailLinkType(null)).toBe(false);
   });
 });
 

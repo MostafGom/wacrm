@@ -2715,5 +2715,41 @@
       "metaApiStatus": "Meta API error: {status}",
       "syncFailed": "Failed to sync templates"
     }
+  },
+  "Auth": {
+    "errors": {
+      "invalidEmail": "Please enter a valid email address.",
+      "weakPassword": "Password should be at least 6 characters.",
+      "signupDisabled": "Sign-ups are disabled on this workspace. Ask an owner for an invitation.",
+      "userExists": "A user with this email address has already been registered.",
+      "signupFailed": "Could not create your account. Please try again.",
+      "invalidCredentials": "Invalid login credentials.",
+      "emailNotConfirmed": "Email not confirmed. Check your inbox for the confirmation link.",
+      "linkInvalid": "This link is invalid or has expired.",
+      "samePassword": "New password should be different from the old password.",
+      "invalidData": "Invalid profile data.",
+      "sessionMissing": "You are not signed in.",
+      "forbiddenOrigin": "Cross-origin request rejected.",
+      "rateLimited": "Too many attempts. Please wait a minute and try again.",
+      "unexpected": "Something went wrong. Please try again."
+    },
+    "email": {
+      "ignore": "If you didn't request this, you can safely ignore this email.",
+      "signupConfirm": {
+        "subject": "Confirm your email",
+        "body": "Confirm your email address to finish creating your account.",
+        "cta": "Confirm email"
+      },
+      "recovery": {
+        "subject": "Reset your password",
+        "body": "Use the link below to choose a new password. It expires in one hour.",
+        "cta": "Reset password"
+      },
+      "emailChange": {
+        "subject": "Confirm your new email",
+        "body": "Confirm this address to finish changing the email on your account.",
+        "cta": "Confirm new email"
+      }
+    }
   }
 }

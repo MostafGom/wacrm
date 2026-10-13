@@ -8,8 +8,10 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // *.int.test.ts need a real Postgres — see vitest.integration.config.ts.
+    exclude: ["**/node_modules/**", "src/**/*.int.test.ts"],
     // Dummy secrets — encryption.ts / webhook-signature.ts read these
-    // at module load. Tests never hit a real Meta/Supabase service, so
+    // at module load. Tests never hit a real Meta service or database, so
     // any 32-byte hex / non-empty string will do; keep them lexically
     // identical to the CI build env so behaviour matches.
     env: {

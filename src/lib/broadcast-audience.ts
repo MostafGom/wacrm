@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@/lib/db';
 
 import { fetchAllInChunks, fetchAllPages } from '@/lib/supabase/paged-query';
 import type { Contact } from '@/types';

@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { SupabaseClient } from '@/lib/db'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import type { AiConfig } from './types'
 

@@ -2715,5 +2715,41 @@
       "metaApiStatus": "Meta API 오류: {status}",
       "syncFailed": "템플릿을 동기화하지 못했습니다"
     }
+  },
+  "Auth": {
+    "errors": {
+      "invalidEmail": "올바른 이메일 주소를 입력하세요.",
+      "weakPassword": "비밀번호는 6자 이상이어야 합니다.",
+      "signupDisabled": "이 워크스페이스는 가입이 비활성화되어 있습니다. 소유자에게 초대를 요청하세요.",
+      "userExists": "이 이메일 주소로 이미 가입된 사용자가 있습니다.",
+      "signupFailed": "계정을 만들 수 없습니다. 다시 시도하세요.",
+      "invalidCredentials": "로그인 정보가 올바르지 않습니다.",
+      "emailNotConfirmed": "이메일이 확인되지 않았습니다. 받은편지함에서 확인 링크를 확인하세요.",
+      "linkInvalid": "이 링크는 유효하지 않거나 만료되었습니다.",
+      "samePassword": "새 비밀번호는 이전 비밀번호와 달라야 합니다.",
+      "invalidData": "프로필 데이터가 올바르지 않습니다.",
+      "sessionMissing": "로그인되어 있지 않습니다.",
+      "forbiddenOrigin": "다른 출처의 요청이 거부되었습니다.",
+      "rateLimited": "시도 횟수가 너무 많습니다. 잠시 후 다시 시도하세요.",
+      "unexpected": "문제가 발생했습니다. 다시 시도하세요."
+    },
+    "email": {
+      "ignore": "요청하지 않으셨다면 이 이메일을 무시하셔도 됩니다.",
+      "signupConfirm": {
+        "subject": "이메일을 확인하세요",
+        "body": "계정 생성을 완료하려면 이메일 주소를 확인하세요.",
+        "cta": "이메일 확인"
+      },
+      "recovery": {
+        "subject": "비밀번호 재설정",
+        "body": "아래 링크에서 새 비밀번호를 설정하세요. 링크는 1시간 후 만료됩니다.",
+        "cta": "비밀번호 재설정"
+      },
+      "emailChange": {
+        "subject": "새 이메일을 확인하세요",
+        "body": "계정 이메일 변경을 완료하려면 이 주소를 확인하세요.",
+        "cta": "새 이메일 확인"
+      }
+    }
   }
 }

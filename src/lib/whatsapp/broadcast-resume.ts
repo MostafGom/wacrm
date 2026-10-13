@@ -16,7 +16,7 @@
 // wizard still owns that; this makes an abandoned one recoverable.
 // ============================================================
 
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient } from '@/lib/db';
 
 import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-core';
 import { chunk } from '@/lib/supabase/paged-query';

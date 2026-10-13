@@ -2715,5 +2715,41 @@
       "metaApiStatus": "Error de la API de Meta: {status}",
       "syncFailed": "Error al sincronizar las plantillas"
     }
+  },
+  "Auth": {
+    "errors": {
+      "invalidEmail": "Introduce una dirección de correo válida.",
+      "weakPassword": "La contraseña debe tener al menos 6 caracteres.",
+      "signupDisabled": "El registro está desactivado en este espacio de trabajo. Pide una invitación a un propietario.",
+      "userExists": "Ya existe un usuario registrado con este correo.",
+      "signupFailed": "No se pudo crear tu cuenta. Inténtalo de nuevo.",
+      "invalidCredentials": "Credenciales de inicio de sesión no válidas.",
+      "emailNotConfirmed": "Correo no confirmado. Revisa tu bandeja de entrada para el enlace de confirmación.",
+      "linkInvalid": "Este enlace no es válido o ha caducado.",
+      "samePassword": "La nueva contraseña debe ser diferente de la anterior.",
+      "invalidData": "Datos de perfil no válidos.",
+      "sessionMissing": "No has iniciado sesión.",
+      "forbiddenOrigin": "Solicitud de otro origen rechazada.",
+      "rateLimited": "Demasiados intentos. Espera un minuto e inténtalo de nuevo.",
+      "unexpected": "Algo salió mal. Inténtalo de nuevo."
+    },
+    "email": {
+      "ignore": "Si no lo solicitaste, puedes ignorar este correo.",
+      "signupConfirm": {
+        "subject": "Confirma tu correo",
+        "body": "Confirma tu dirección de correo para terminar de crear tu cuenta.",
+        "cta": "Confirmar correo"
+      },
+      "recovery": {
+        "subject": "Restablece tu contraseña",
+        "body": "Usa el enlace de abajo para elegir una nueva contraseña. Caduca en una hora.",
+        "cta": "Restablecer contraseña"
+      },
+      "emailChange": {
+        "subject": "Confirma tu nuevo correo",
+        "body": "Confirma esta dirección para terminar de cambiar el correo de tu cuenta.",
+        "cta": "Confirmar nuevo correo"
+      }
+    }
   }
 }

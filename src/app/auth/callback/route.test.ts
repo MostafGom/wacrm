@@ -1,18 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// The server client wraps `next/headers`, which has no request scope
-// under vitest — stub the whole module and script the two exchange
-// methods the route can call.
+// The auth service talks to Postgres — stub it and script consumeLink.
 const mocks = vi.hoisted(() => ({
-  exchangeCodeForSession: vi.fn(),
-  verifyOtp: vi.fn(),
-  createClient: vi.fn(),
+  consumeLink: vi.fn(),
 }));
 
-vi.mock('@/lib/supabase/server', () => ({
-  createClient: mocks.createClient,
-}));
+vi.mock('@/lib/auth/service', () => {
+  class AuthFailure extends Error {
+    constructor(
+      readonly code: string,
+      readonly status: number,
+      message: string,
+    ) {
+      super(message);
+    }
+  }
+  return { AuthFailure, consumeLink: mocks.consumeLink };
+});
 
+import { AuthFailure } from '@/lib/auth/service';
 import { GET } from './route';
 
 function request(query: string): Request {
@@ -20,42 +26,28 @@ function request(query: string): Request {
 }
 
 beforeEach(() => {
-  mocks.exchangeCodeForSession.mockResolvedValue({ error: null });
-  mocks.verifyOtp.mockResolvedValue({ error: null });
-  mocks.createClient.mockResolvedValue({
-    auth: {
-      exchangeCodeForSession: mocks.exchangeCodeForSession,
-      verifyOtp: mocks.verifyOtp,
-    },
+  mocks.consumeLink.mockResolvedValue({
+    token: 'session-token',
+    expiresAt: new Date(Date.now() + 86_400_000),
   });
-  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 describe('GET /auth/callback', () => {
-  it('exchanges a PKCE code and redirects to the validated next path', async () => {
-    const res = await GET(request('code=pkce-123&next=%2Freset-password'));
+  it('consumes a recovery token, sets the session cookie and redirects to next', async () => {
+    const res = await GET(request('type=recovery&token=tok-1&next=%2Freset-password'));
 
-    expect(mocks.exchangeCodeForSession).toHaveBeenCalledWith('pkce-123');
-    expect(mocks.verifyOtp).not.toHaveBeenCalled();
+    expect(mocks.consumeLink).toHaveBeenCalledWith('recovery', 'tok-1', expect.any(Object));
     expect(res.status).toBe(303);
     expect(res.headers.get('location')).toBe('/reset-password');
+    expect(res.headers.get('set-cookie')).toContain('wacrm_session=session-token');
+    expect(res.headers.get('set-cookie')).toContain('HttpOnly');
   });
 
-  it('verifies a token_hash link through verifyOtp', async () => {
-    const res = await GET(
-      request('token_hash=th-1&type=recovery&next=%2Freset-password'),
-    );
-
-    expect(mocks.verifyOtp).toHaveBeenCalledWith({
-      type: 'recovery',
-      token_hash: 'th-1',
-    });
-    expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
+  it('defaults a recovery link to /reset-password and others to /dashboard', async () => {
+    let res = await GET(request('type=recovery&token=a'));
     expect(res.headers.get('location')).toBe('/reset-password');
-  });
-
-  it('defaults next to /dashboard when absent', async () => {
-    const res = await GET(request('code=abc'));
+    res = await GET(request('type=signup_confirm&token=a'));
     expect(res.headers.get('location')).toBe('/dashboard');
   });
 
@@ -63,44 +55,31 @@ describe('GET /auth/callback', () => {
   // minted a session and must not hand the browser to another origin.
   it('refuses an off-origin next and falls back to /dashboard', async () => {
     for (const next of ['//evil.example', 'https://evil.example', '/\\x']) {
-      const res = await GET(request(`code=abc&next=${encodeURIComponent(next)}`));
+      const res = await GET(request(`type=signup_confirm&token=abc&next=${encodeURIComponent(next)}`));
       expect(res.headers.get('location')).toBe('/dashboard');
     }
   });
 
-  it('sends a failed exchange to /login with a reason, not a 404 or a raw error', async () => {
-    mocks.exchangeCodeForSession.mockResolvedValue({
-      error: { message: 'PKCE code verifier not found' },
-    });
+  it('sends an expired / used token to /login?error=link_expired', async () => {
+    mocks.consumeLink.mockRejectedValue(new AuthFailure('otp_expired', 400, 'expired'));
 
-    const res = await GET(request('code=stale&next=%2Freset-password'));
+    const res = await GET(request('type=recovery&token=stale'));
 
     expect(res.status).toBe(303);
-    expect(res.headers.get('location')).toBe('/login?error=link_invalid');
-    expect(console.warn).toHaveBeenCalled();
-  });
-
-  it('reports a link Supabase already rejected as expired, without touching the client', async () => {
-    const res = await GET(
-      request(
-        'error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired',
-      ),
-    );
-
-    expect(mocks.createClient).not.toHaveBeenCalled();
     expect(res.headers.get('location')).toBe('/login?error=link_expired');
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
-  it('treats a bare visit with no credential as an invalid link', async () => {
-    const res = await GET(request('next=%2Fdashboard'));
-
-    expect(mocks.createClient).not.toHaveBeenCalled();
-    expect(res.headers.get('location')).toBe('/login?error=link_invalid');
+  it('sends a link with no token or an unknown type to /login?error=link_invalid', async () => {
+    for (const q of ['', 'type=recovery', 'type=magiclink&token=x', 'code=abc']) {
+      const res = await GET(request(q));
+      expect(res.headers.get('location')).toBe('/login?error=link_invalid');
+    }
+    expect(mocks.consumeLink).not.toHaveBeenCalled();
   });
 
-  it('emits a relative Location so the redirect works behind a reverse proxy', async () => {
-    const res = await GET(request('code=abc&next=%2Fjoin%2Ftoken-1'));
-    expect(res.headers.get('location')).toBe('/join/token-1');
+  it('never caches the response', async () => {
+    const res = await GET(request('type=recovery&token=a'));
     expect(res.headers.get('cache-control')).toBe('no-store');
   });
 });

@@ -1,16 +1,4 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-
-// Lazy, shared service-role client for the Flows engine.
-// Mirrors src/lib/automations/admin-client.ts — same shape so anyone
-// reading either file picks up the convention immediately.
-let _adminClient: SupabaseClient | null = null
-
-export function supabaseAdmin(): SupabaseClient {
-  if (!_adminClient) {
-    _adminClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    )
-  }
-  return _adminClient
-}
+// Service-role client for the flows engine. RLS is bypassed — every
+// query must scope by account_id itself. Shared implementation:
+// src/lib/db/admin.ts.
+export { supabaseAdmin } from '@/lib/db/admin'

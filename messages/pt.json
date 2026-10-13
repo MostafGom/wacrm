@@ -2715,5 +2715,41 @@
       "metaApiStatus": "Erro da API da Meta: {status}",
       "syncFailed": "Falha ao sincronizar os modelos"
     }
+  },
+  "Auth": {
+    "errors": {
+      "invalidEmail": "Insira um endereço de e-mail válido.",
+      "weakPassword": "A senha deve ter pelo menos 6 caracteres.",
+      "signupDisabled": "Os cadastros estão desativados neste espaço de trabalho. Peça um convite a um proprietário.",
+      "userExists": "Já existe um usuário cadastrado com este e-mail.",
+      "signupFailed": "Não foi possível criar sua conta. Tente novamente.",
+      "invalidCredentials": "Credenciais de login inválidas.",
+      "emailNotConfirmed": "E-mail não confirmado. Verifique sua caixa de entrada para o link de confirmação.",
+      "linkInvalid": "Este link é inválido ou expirou.",
+      "samePassword": "A nova senha deve ser diferente da antiga.",
+      "invalidData": "Dados de perfil inválidos.",
+      "sessionMissing": "Você não está conectado.",
+      "forbiddenOrigin": "Solicitação de outra origem rejeitada.",
+      "rateLimited": "Muitas tentativas. Aguarde um minuto e tente novamente.",
+      "unexpected": "Algo deu errado. Tente novamente."
+    },
+    "email": {
+      "ignore": "Se você não fez esta solicitação, pode ignorar este e-mail.",
+      "signupConfirm": {
+        "subject": "Confirme seu e-mail",
+        "body": "Confirme seu endereço de e-mail para concluir a criação da sua conta.",
+        "cta": "Confirmar e-mail"
+      },
+      "recovery": {
+        "subject": "Redefina sua senha",
+        "body": "Use o link abaixo para escolher uma nova senha. Ele expira em uma hora.",
+        "cta": "Redefinir senha"
+      },
+      "emailChange": {
+        "subject": "Confirme seu novo e-mail",
+        "body": "Confirme este endereço para concluir a alteração do e-mail da sua conta.",
+        "cta": "Confirmar novo e-mail"
+      }
+    }
   }
 }
