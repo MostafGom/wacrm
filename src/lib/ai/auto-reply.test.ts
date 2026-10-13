@@ -207,10 +207,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
 describe('dispatchInboundToAiReply — typing indicator (#527)', () => {
   it('shows "typing…" on the inbound wamid before calling the LLM', async () => {
     await dispatchInboundToAiReply(ARGS)
-    expect(h.loadAccountMetaCredentials).toHaveBeenCalledWith(
-      expect.anything(),
-      'acct-1',
-    )
+    expect(h.loadAccountMetaCredentials).toHaveBeenCalledWith('acct-1')
     expect(h.sendTypingIndicator).toHaveBeenCalledTimes(1)
     expect(h.sendTypingIndicator).toHaveBeenCalledWith({
       phoneNumberId: 'pn-1',

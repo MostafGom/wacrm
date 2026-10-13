@@ -16,6 +16,7 @@ import {
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
 import { assertConversationInAccount } from '@/lib/whatsapp/conversation-scope'
 import { supabaseAdmin } from './admin-client'
+import { asService } from '@/server/db'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
@@ -42,15 +43,16 @@ const t = getT('LibErrors')
  * auto-reply's typing indicator) reuse it rather than growing a copy.
  */
 export async function loadAccountMetaCredentials(
-  db: ReturnType<typeof supabaseAdmin>,
   accountId: string,
 ): Promise<{ phoneNumberId: string; accessToken: string }> {
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('phone_number_id, access_token')
-    .eq('account_id', accountId)
-    .single()
-  if (configErr || !config) {
+  const config = await asService((db) =>
+    db
+      .selectFrom('whatsapp_config')
+      .select(['phone_number_id', 'access_token'])
+      .where('account_id', '=', accountId)
+      .executeTakeFirst(),
+  )
+  if (!config) {
     throw new Error(t('send.notConfigured'))
   }
   return {
@@ -119,7 +121,6 @@ export async function engineSendText(
   const sanitized = sendTarget.target
 
   const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
-    db,
     args.accountId,
   )
 
@@ -233,7 +234,6 @@ export async function engineSendMedia(
   const sanitized = sendTarget.target
 
   const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
-    db,
     args.accountId,
   )
 
@@ -389,7 +389,6 @@ async function sendInteractiveViaMeta(
   const sanitized = sendTarget.target
 
   const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
-    db,
     input.accountId,
   )
 

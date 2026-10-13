@@ -228,7 +228,6 @@ async function showTypingIndicator(
 ): Promise<void> {
   try {
     const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
-      db,
       accountId,
     )
     await sendTypingIndicator({
