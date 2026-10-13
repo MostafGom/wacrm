@@ -2,7 +2,7 @@
   "name": "wacrm",
   "version": "0.8.0",
   "private": true,
-  "description": "Self-hostable CRM template for WhatsApp built on Next.js and Supabase — shared inbox, contacts, sales pipelines, broadcasts, and no-code automations.",
+  "description": "Self-hostable CRM template for WhatsApp built on Next.js and plain PostgreSQL — shared inbox, contacts, sales pipelines, broadcasts, and no-code automations.",
   "license": "MIT",
   "author": "Arnas Donauskas",
   "homepage": "https://github.com/ArnasDon/wacrm",
@@ -18,7 +18,7 @@
     "whatsapp",
     "whatsapp-business-api",
     "nextjs",
-    "supabase",
+    "postgresql",
     "automation",
     "broadcast",
     "self-hosted",
@@ -37,7 +37,10 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:status": "node scripts/migrate.mjs status"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -48,13 +51,16 @@
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "~2.109.0",
     "@xyflow/react": "^12.11.3",
+    "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "lucide-react": "^1.52.0",
     "next": "16.3.8",
     "next-intl": "^4.14.8",
+    "nodemailer": "^10.1.0",
     "opus-recorder": "^8.0.5",
+    "pg": "^8.23.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.10.1",
@@ -66,10 +72,14 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^26",
+    "@types/nodemailer": "^8.0.2",
+    "@types/pg": "^8.23.1",
+    "@types/pg-copy-streams": "^1.2.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
+    "pg-copy-streams": "^7.0.0",
     "prettier": "^3.9.9",
     "prettier-plugin-tailwindcss": "^0.8.1",
     "tailwindcss": "^4",
@@ -91,5 +101,8 @@
     "@modelcontextprotocol/sdk": "^1.31.0",
     "undici": "^7.29.1",
     "source-map-js": "^1.2.2"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/client-s3": "^3.1150.0"
   }
 }

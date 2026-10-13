@@ -1,34 +1,25 @@
 name: Migrations
 
-# Replaces the "Supabase Preview" check, which never worked: it fired
-# only on migration changes and then either 404'd in four seconds
-# ("Postgres config not found") or hung forever waiting on a branch
-# action, because two stale dashboard integrations were pointed at this
-# repo and neither could provision. It never applied a migration, so
-# every `supabase/migrations/*.sql` file in this repo has shipped
-# unexecuted by CI.
-#
-# This job does the thing that check only claimed to: boot a clean
-# Postgres and replay every migration, in order, from nothing. It needs
-# no secrets and no Supabase account — the CLI runs the database in a
-# container on the runner.
+# Boot a clean Postgres 17 + pgvector and replay every migration, in
+# order, from nothing — the same image docker-compose uses. Needs no
+# secrets and no external services.
 
 on:
   pull_request:
-    # `supabase/**` rather than `supabase/migrations/**` so a change to
-    # config.toml re-runs the check too, and this workflow is listed so
-    # that edits to the check are validated by the check.
-    #
     # NOTE: if this is ever made a REQUIRED status check, drop these
     # filters. GitHub leaves a required check that never ran stuck as
     # "expected", which blocks every PR that doesn't touch SQL.
     paths:
-      - 'supabase/**'
+      - 'db/**'
+      - 'scripts/migrate.mjs'
+      - 'src/lib/db/**'
       - '.github/workflows/migrations.yml'
   push:
     branches: [main]
     paths:
-      - 'supabase/**'
+      - 'db/**'
+      - 'scripts/migrate.mjs'
+      - 'src/lib/db/**'
       - '.github/workflows/migrations.yml'
 
 concurrency:
@@ -39,33 +30,47 @@ jobs:
   apply:
     name: Apply to a clean database
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wacrm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/wacrm
+      APP_DB_PASSWORD: ci-app-password
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/wacrm
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the Supabase CLI
-        uses: supabase/setup-cli@v3
+      - uses: actions/setup-node@v4
         with:
-          # Pinned rather than `latest`: this check is infrastructure,
-          # and a CLI release changing behaviour should be a deliberate
-          # bump in a PR, not a Tuesday where main goes red.
-          version: 2.113.0
+          node-version: 20
+          cache: npm
 
-      - name: Start Postgres
-        run: supabase db start
+      - run: npm ci
 
-      # `db start` already applies the migrations on a cold volume, but
-      # only on a cold volume — it is a no-op against a database that
-      # already exists. `db reset` drops and rebuilds unconditionally,
-      # so this step, not the one above, is the guarantee that every
-      # migration ran in filename order against nothing. It fails on the
-      # first statement Postgres rejects. --no-seed because there is no
-      # seed script and this is about schema, not data.
+      # Fails on the first statement Postgres rejects.
       - name: Replay every migration from scratch
-        run: supabase db reset --local --no-seed
+        run: npm run db:migrate
+
+      # A second run must be a no-op.
+      - name: Re-run is idempotent
+        run: npm run db:migrate
 
       # A migration can apply "successfully" and still do nothing —
       # every DDL statement here is IF NOT EXISTS-guarded, which turns a
       # typo'd object name into a silent no-op. Assert the outcome, not
       # just the absence of an error.
       - name: Verify the resulting schema
-        run: supabase db query --local --file supabase/ci/verify-schema.sql
+        run: psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -f db/ci/verify-schema.sql
+
+      - name: Integration tests (adapter, RLS, auth, storage, realtime)
+        run: npm run test:integration

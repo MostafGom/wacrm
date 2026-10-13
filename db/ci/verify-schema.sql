@@ -1,7 +1,7 @@
 -- Post-migration assertions for the CI job in
 -- `.github/workflows/migrations.yml`.
 --
--- `supabase db reset` already fails on any statement Postgres rejects,
+-- `the migration runner already fails on any statement Postgres rejects,
 -- so this is not about syntax. It's about the quieter failure: a
 -- migration that applies cleanly and does nothing. Every DDL statement
 -- in this repo is guarded with IF NOT EXISTS / ON CONFLICT so the files
@@ -21,7 +21,7 @@ BEGIN
     RAISE EXCEPTION 'public.whatsapp_config is missing — migrations did not apply';
   END IF;
 
-  -- Supabase provides the storage schema; migrations 016/020/023 write
+  -- 000_supabase_compat provides the storage schema; 016/020/023 write
   -- to it. If it is absent the bucket migrations silently accomplish
   -- nothing, which is precisely the case a plain "no errors" run hides.
   IF to_regclass('storage.buckets') IS NULL THEN
