@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SupabaseClient } from '@/lib/db';
+import type { Runner } from '@/server/db';
 
 import {
   sendMessageToConversation,
@@ -7,15 +7,81 @@ import {
   type SendMessageParams,
 } from './send-message';
 
-// A db that explodes if touched — these tests cover the param
-// validation that MUST short-circuit before any query runs.
-function noDb(): SupabaseClient {
-  return {
-    from() {
-      throw new Error('db should not be queried for invalid params');
-    },
-  } as unknown as SupabaseClient;
+// ============================================================
+// Repository fakes. The send core reads through the repos inside
+// `run(...)`; each test scripts what they return and captures writes.
+// ============================================================
+
+interface CapturedWrites {
+  message?: Record<string, unknown>;
+  conversation?: Record<string, unknown>;
+  contactPatch?: Record<string, unknown>;
+  pausedFlowsFor?: string;
 }
+
+const repo = vi.hoisted(() => ({
+  conversation: null as null | Record<string, unknown>,
+  config: null as null | Record<string, unknown>,
+  templateRows: [] as unknown[],
+  captured: {} as {
+    message?: Record<string, unknown>;
+    conversation?: Record<string, unknown>;
+    contactPatch?: Record<string, unknown>;
+    pausedFlowsFor?: string;
+  },
+}));
+
+vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule());
+
+vi.mock('@/server/repos/conversations', () => ({
+  getConversationForSend: async () => repo.conversation ?? undefined,
+  touchConversationLastMessage: async (
+    _db: unknown,
+    _accountId: string,
+    _id: string,
+    lastMessageText: string
+  ) => {
+    repo.captured.conversation = { last_message_text: lastMessageText };
+  },
+}));
+
+vi.mock('@/server/repos/messages', () => ({
+  getWhatsAppSendConfig: async () => repo.config ?? undefined,
+  getReplyParent: async () => undefined,
+  updateWhatsAppAccessToken: async () => {},
+  insertOutboundMessage: async (_db: unknown, values: Record<string, unknown>) => {
+    repo.captured.message = values;
+    return { id: 'msg-1', ...values };
+  },
+  pauseActiveFlowRunsForContact: async (
+    _db: unknown,
+    _accountId: string,
+    contactId: string
+  ) => {
+    repo.captured.pausedFlowsFor = contactId;
+  },
+}));
+
+vi.mock('@/server/repos/templates', () => ({
+  listTemplatesByName: async () => repo.templateRows,
+}));
+
+vi.mock('@/server/repos/contacts', () => ({
+  updateContact: async (
+    _db: unknown,
+    _accountId: string,
+    _id: string,
+    patch: Record<string, unknown>
+  ) => {
+    repo.captured.contactPatch = patch;
+  },
+}));
+
+// A runner that explodes if used — these tests cover the param
+// validation that MUST short-circuit before any query runs.
+const noDb: Runner = () => {
+  throw new Error('db should not be queried for invalid params');
+};
 
 async function expectSendError(
   params: SendMessageParams,
@@ -23,9 +89,9 @@ async function expectSendError(
   messageMatch?: RegExp
 ) {
   await expect(
-    sendMessageToConversation(noDb(), 'acct-1', params)
+    sendMessageToConversation(noDb, 'acct-1', params)
   ).rejects.toBeInstanceOf(SendMessageError);
-  await sendMessageToConversation(noDb(), 'acct-1', params).catch(
+  await sendMessageToConversation(noDb, 'acct-1', params).catch(
     (e: SendMessageError) => {
       expect(e.status).toBe(status);
       if (messageMatch) expect(e.message).toMatch(messageMatch);
@@ -132,20 +198,19 @@ describe('sendMessageToConversation — param validation (pre-DB)', () => {
 
   it('allows a long "caption" on audio (audio carries none) — so it reaches the DB', async () => {
     // Audio is exempt from the caption cap, so validation passes and we
-    // proceed to the conversation lookup — proven by the stub throwing.
+    // proceed to the conversation lookup — proven by the runner throwing.
     const spy = vi.fn(() => {
       throw new Error('reached DB');
     });
-    const db = { from: spy } as unknown as SupabaseClient;
     await expect(
-      sendMessageToConversation(db, 'acct-1', {
+      sendMessageToConversation(spy as unknown as Runner, 'acct-1', {
         ...base,
         messageType: 'audio',
         mediaUrl: 'https://x/y.ogg',
         contentText: 'a'.repeat(2000),
       })
     ).rejects.toThrow('reached DB');
-    expect(spy).toHaveBeenCalledWith('conversations');
+    expect(spy).toHaveBeenCalled();
   });
 });
 
@@ -182,78 +247,28 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
   isLegacyFormat: () => false,
 }));
 
-vi.mock('@/lib/flows/admin-client', () => ({
-  // Only used for the best-effort "pause active flow run" write.
-  supabaseAdmin: () => ({
-    from: () => ({
-      update: () => ({
-        eq: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
-      }),
-    }),
-  }),
-}));
-
-interface CapturedWrites {
-  message?: Record<string, unknown>;
-  conversation?: Record<string, unknown>;
-}
+const CONV = '11111111-1111-4111-8111-111111111111';
 
 /**
- * Supabase fake covering the tables the send path touches. Each table
- * gets a builder that is both chainable and awaitable, so the same
- * object serves `.single()` lookups and the bare `select().eq().eq()`
- * the template resolver uses.
+ * Script the repositories for one send and return a runner that just
+ * invokes each DB step (the repos are faked above).
  */
-function sendPathDb(
+function sendPath(
   templateRows: unknown[],
   captured: CapturedWrites,
   contact: Record<string, unknown> = { id: 'ct-1', phone: '+15551234567' }
-): SupabaseClient {
-  const conversation = {
-    id: 'cv-1',
-    contact,
-  };
-  const config = {
+): Runner {
+  repo.conversation = { id: CONV, contact };
+  repo.config = {
     id: 'cfg-1',
     phone_number_id: 'pn-1',
     access_token: 'token',
   };
-
-  return {
-    from(table: string) {
-      const builder: Record<string, unknown> = {
-        select: () => builder,
-        eq: () => builder,
-        insert: (row: Record<string, unknown>) => {
-          if (table === 'messages') captured.message = row;
-          return builder;
-        },
-        update: (row: Record<string, unknown>) => {
-          if (table === 'conversations') captured.conversation = row;
-          return builder;
-        },
-        maybeSingle: async () => ({ data: null, error: null }),
-        single: async () => {
-          if (table === 'conversations') {
-            return { data: conversation, error: null };
-          }
-          if (table === 'whatsapp_config') return { data: config, error: null };
-          if (table === 'messages') {
-            return { data: { id: 'msg-1' }, error: null };
-          }
-          return { data: null, error: null };
-        },
-        // Bare-await result — only message_templates is read this way.
-        then: (resolve: (r: { data: unknown[]; error: null }) => unknown) =>
-          resolve({
-            data: table === 'message_templates' ? templateRows : [],
-            error: null,
-          }),
-      };
-      return builder;
-    },
-  } as unknown as SupabaseClient;
+  repo.templateRows = templateRows;
+  repo.captured = captured;
+  return (fn) => fn({} as never);
 }
+
 
 const TEMPLATE_ROW = {
   id: 'tpl-1',
@@ -269,10 +284,10 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
   it('stores the substituted body when the caller sends no text', async () => {
     const captured: CapturedWrites = {};
     const result = await sendMessageToConversation(
-      sendPathDb([TEMPLATE_ROW], captured),
+      sendPath([TEMPLATE_ROW], captured),
       'acct-1',
       {
-        conversationId: 'cv-1',
+        conversationId: CONV,
         messageType: 'template',
         templateName: 'order_update',
         templateParams: ['A123', 'Friday'],
@@ -293,8 +308,8 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
 
   it('reads body values out of the structured params shape too', async () => {
     const captured: CapturedWrites = {};
-    await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
-      conversationId: 'cv-1',
+    await sendMessageToConversation(sendPath([TEMPLATE_ROW], captured), 'acct-1', {
+      conversationId: CONV,
       messageType: 'template',
       templateName: 'order_update',
       templateMessageParams: { body: ['B456', 'Monday'] },
@@ -306,8 +321,8 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
 
   it("does not override the composer's pre-rendered text", async () => {
     const captured: CapturedWrites = {};
-    await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
-      conversationId: 'cv-1',
+    await sendMessageToConversation(sendPath([TEMPLATE_ROW], captured), 'acct-1', {
+      conversationId: CONV,
       messageType: 'template',
       templateName: 'order_update',
       templateParams: ['A123', 'Friday'],
@@ -319,8 +334,8 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
   it("sends the local row's language when the caller names none", async () => {
     sendTemplateMessage.mockClear();
     const captured: CapturedWrites = {};
-    await sendMessageToConversation(sendPathDb([TEMPLATE_ROW], captured), 'acct-1', {
-      conversationId: 'cv-1',
+    await sendMessageToConversation(sendPath([TEMPLATE_ROW], captured), 'acct-1', {
+      conversationId: CONV,
       messageType: 'template',
       templateName: 'order_update',
       templateParams: ['A123', 'Friday'],
@@ -335,8 +350,8 @@ describe('sendMessageToConversation — template persistence (#483)', () => {
 
   it('leaves content_text null when the account has no local template row', async () => {
     const captured: CapturedWrites = {};
-    await sendMessageToConversation(sendPathDb([], captured), 'acct-1', {
-      conversationId: 'cv-1',
+    await sendMessageToConversation(sendPath([], captured), 'acct-1', {
+      conversationId: CONV,
       messageType: 'template',
       templateName: 'never_synced',
       templateParams: ['A123'],
@@ -367,9 +382,9 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     vi.mocked(sendTextMessage).mockClear();
 
     await sendMessageToConversation(
-      sendPathDb([], captured, { id: 'ct-1', phone: '', wa_user_id: BSUID }),
+      sendPath([], captured, { id: 'ct-1', phone: '', wa_user_id: BSUID }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: CONV, messageType: 'text', contentText: 'hi' }
     );
 
     expect(vi.mocked(sendTextMessage)).toHaveBeenCalledWith(
@@ -383,13 +398,13 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     vi.mocked(sendTextMessage).mockClear();
 
     await sendMessageToConversation(
-      sendPathDb([], captured, {
+      sendPath([], captured, {
         id: 'ct-1',
         phone: '+15551234567',
         wa_user_id: BSUID,
       }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: CONV, messageType: 'text', contentText: 'hi' }
     );
 
     // Only the phone path supports the trunk-prefix variant retry, so
@@ -405,13 +420,13 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     vi.mocked(sendTextMessage).mockClear();
 
     await sendMessageToConversation(
-      sendPathDb([], captured, {
+      sendPath([], captured, {
         id: 'ct-1',
         phone: 'not-a-number',
         wa_user_id: BSUID,
       }),
       'acct-1',
-      { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+      { conversationId: CONV, messageType: 'text', contentText: 'hi' }
     );
 
     expect(vi.mocked(sendTextMessage)).toHaveBeenCalledWith(
@@ -423,9 +438,9 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     const captured: CapturedWrites = {};
     await expect(
       sendMessageToConversation(
-        sendPathDb([], captured, { id: 'ct-1', phone: '' }),
+        sendPath([], captured, { id: 'ct-1', phone: '' }),
         'acct-1',
-        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+        { conversationId: CONV, messageType: 'text', contentText: 'hi' }
       )
     ).rejects.toThrow(/no phone number or WhatsApp user ID/);
   });
@@ -434,13 +449,13 @@ describe('sendMessageToConversation — BSUID recipients (#519)', () => {
     const captured: CapturedWrites = {};
     await expect(
       sendMessageToConversation(
-        sendPathDb([], captured, {
+        sendPath([], captured, {
           id: 'ct-1',
           phone: '',
           wa_user_id: 'garbage',
         }),
         'acct-1',
-        { conversationId: 'cv-1', messageType: 'text', contentText: 'hi' }
+        { conversationId: CONV, messageType: 'text', contentText: 'hi' }
       )
     ).rejects.toThrow(/no phone number or WhatsApp user ID/);
   });

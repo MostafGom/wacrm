@@ -1,7 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { createChannel } from "@/lib/realtime/client";
+import {
+  listInboxAgents,
+  listMessages,
+  listReactions,
+  markConversationRead,
+  updateConversation,
+  type InboxAgent,
+} from "@/lib/inbox/inbox-api";
 import { useAuth } from "@/hooks/use-auth";
 import { usePresence } from "@/hooks/use-presence";
 import { PresenceDot } from "@/components/presence/presence-dot";
@@ -14,7 +22,6 @@ import type {
   Contact,
   ConversationStatus,
   MessageTemplate,
-  Profile,
   InteractiveMessagePayload,
 } from "@/types";
 import {
@@ -174,7 +181,7 @@ export function MessageThread({
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profiles, setProfiles] = useState<InboxAgent[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
   // Purely visual spin state for the manual-refresh button. The actual
   // refetch is fire-and-forget through `onRefresh` (which bumps the
@@ -209,24 +216,17 @@ export function MessageThread({
     messageId: string;
   } | null>(null);
 
-  // Profiles are bounded by RLS to rows the current user is allowed to
-  // see — today that's just the current user, but the dropdown keeps the
-  // shape ready for shared-team workspaces without a refactor.
+  // Assignee candidates: the members of the caller's account, by name.
   useEffect(() => {
     let cancelled = false;
-    const supabase = createClient();
-    supabase
-      .from("profiles")
-      .select("*")
-      .order("full_name")
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          console.error("Failed to fetch profiles:", error);
-          return;
-        }
-        setProfiles((data as Profile[]) ?? []);
-      });
+    listInboxAgents().then(({ data, error }) => {
+      if (cancelled) return;
+      if (error) {
+        console.error("Failed to fetch profiles:", error.message);
+        return;
+      }
+      setProfiles(data.profiles);
+    });
     return () => {
       cancelled = true;
     };
@@ -294,24 +294,19 @@ export function MessageThread({
   useEffect(() => {
     if (!conversationId) return;
 
-    const supabase = createClient();
     let cancelled = false;
 
     (async () => {
       setLoading(true);
 
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
+      const { data, error } = await listMessages(conversationId);
 
       if (cancelled) return;
 
       if (error) {
-        console.error("Failed to fetch messages:", error);
+        console.error("Failed to fetch messages:", error.message);
       } else {
-        onMessagesLoadedRef.current(data ?? []);
+        onMessagesLoadedRef.current(data.messages);
       }
 
       if (!cancelled) setLoading(false);
@@ -335,20 +330,16 @@ export function MessageThread({
       setReactions([]);
       return;
     }
-    const supabase = createClient();
     let cancelled = false;
 
     (async () => {
-      const { data, error } = await supabase
-        .from("message_reactions")
-        .select("*")
-        .eq("conversation_id", conversationId);
+      const { data, error } = await listReactions(conversationId);
       if (cancelled) return;
       if (error) {
-        console.error("Failed to fetch reactions:", error);
+        console.error("Failed to fetch reactions:", error.message);
         return;
       }
-      setReactions((data as MessageReaction[]) ?? []);
+      setReactions(data.reactions);
     })();
 
     return () => {
@@ -361,10 +352,8 @@ export function MessageThread({
   // conversation and avoids cross-conversation chatter on a busy inbox.
   useEffect(() => {
     if (!conversationId) return;
-    const supabase = createClient();
 
-    const channel = supabase
-      .channel(`reactions:${conversationId}`)
+    const channel = createChannel(`reactions:${conversationId}`)
       .on(
         "postgres_changes",
         {
@@ -425,7 +414,7 @@ export function MessageThread({
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
     };
   }, [conversationId]);
 
@@ -446,14 +435,9 @@ export function MessageThread({
   // is 0 the condition is false, so no further UPDATE is issued.
   useEffect(() => {
     if (!conversationId || !hasUnread) return;
-    const supabase = createClient();
-    supabase
-      .from("conversations")
-      .update({ unread_count: 0 })
-      .eq("id", conversationId)
-      .then(({ error }) => {
-        if (error) console.error("Failed to reset unread_count:", error);
-      });
+    markConversationRead(conversationId).then(({ error }) => {
+      if (error) console.error("Failed to reset unread_count:", error.message);
+    });
   }, [conversationId, hasUnread]);
 
   // Auto-scroll to bottom on new messages
@@ -644,11 +628,8 @@ export function MessageThread({
     async (status: ConversationStatus) => {
       if (!conversation) return;
 
-      const supabase = createClient();
-      await supabase
-        .from("conversations")
-        .update({ status })
-        .eq("id", conversation.id);
+      const { error } = await updateConversation(conversation.id, { status });
+      if (error) console.error("Failed to update status:", error.message);
 
       onStatusChange(conversation.id, status);
     },
@@ -845,14 +826,12 @@ export function MessageThread({
     async (agentId: string | null) => {
       if (!conversation) return;
 
-      const supabase = createClient();
-      const { error } = await supabase
-        .from("conversations")
-        .update({ assigned_agent_id: agentId })
-        .eq("id", conversation.id);
+      const { error } = await updateConversation(conversation.id, {
+        assigned_agent_id: agentId,
+      });
 
       if (error) {
-        console.error("Failed to update assignment:", error);
+        console.error("Failed to update assignment:", error.message);
         toast.error(t("assignmentUpdateFailed"));
         return;
       }

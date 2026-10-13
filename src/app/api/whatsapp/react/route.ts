@@ -9,6 +9,11 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limit';
 import { getT } from '@/lib/i18n/translate';
+import { asUser } from '@/server/db';
+import { isUuid } from '@/server/http';
+import { getConversationForSend } from '@/server/repos/conversations';
+import { getMessageRef, getWhatsAppSendConfig } from '@/server/repos/messages';
+import { deleteAgentReaction, upsertAgentReaction } from '@/server/repos/reactions';
 
 const t = getT('Api');
 
@@ -27,7 +32,7 @@ export async function POST(request: Request) {
     // reaction to Meta before mirroring it locally — so, as on /send, a
     // missing role check let a read-only viewer put a visible reaction on
     // the customer's message even though RLS blocked the local mirror.
-    const { supabase, accountId, userId } = await requireRole('agent');
+    const { accountId, userId } = await requireRole('agent');
 
     const limit = checkRateLimit(`react:${userId}`, RATE_LIMITS.react);
     if (!limit.success) {
@@ -47,16 +52,26 @@ export async function POST(request: Request) {
       );
     }
 
-    // Resolve target message + its conversation; verify ownership.
-    const { data: targetMessage, error: msgError } = await supabase
-      .from('messages')
-      .select('id, message_id, conversation_id')
-      .eq('id', message_id)
-      .maybeSingle();
+    // Resolve target message + its conversation (with the contact's send
+    // handles) and the account's WhatsApp config; verify ownership.
+    const loaded = isUuid(message_id)
+      ? await asUser(userId, async (db) => {
+          const targetMessage = await getMessageRef(db, accountId, message_id);
+          if (!targetMessage) return null;
+          const conversation = await getConversationForSend(
+            db,
+            accountId,
+            targetMessage.conversation_id,
+          );
+          const config = await getWhatsAppSendConfig(db, accountId);
+          return { targetMessage, conversation, config };
+        })
+      : null;
 
-    if (msgError || !targetMessage) {
+    if (!loaded) {
       return NextResponse.json({ error: t('react.messageNotFound') }, { status: 404 });
     }
+    const { targetMessage, conversation, config } = loaded;
 
     if (!targetMessage.message_id) {
       // No Meta ID yet — usually a sending/failed agent message. We can't
@@ -67,26 +82,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const { data: conversation, error: convError } = await supabase
-      .from('conversations')
-      .select('id, account_id, contact:contacts(phone, wa_user_id)')
-      .eq('id', targetMessage.conversation_id)
-      .eq('account_id', accountId)
-      .maybeSingle();
-
-    if (convError || !conversation) {
+    if (!conversation) {
       return NextResponse.json(
         { error: t('common.conversationNotFound') },
         { status: 404 },
       );
     }
 
-    const contact = Array.isArray(conversation.contact)
-      ? conversation.contact[0]
-      : conversation.contact;
     // Phone number, or the business-scoped user ID for a contact Meta
     // never gave us a number for (issue #519).
-    const sendTarget = resolveContactSendTarget(contact);
+    const sendTarget = conversation.contact
+      ? resolveContactSendTarget(conversation.contact)
+      : null;
     if (!sendTarget) {
       return NextResponse.json(
         { error: t('react.contactNoPhone') },
@@ -95,13 +102,7 @@ export async function POST(request: Request) {
     }
 
     // WhatsApp config + access token. Account-scoped post-multi-user.
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, access_token')
-      .eq('account_id', accountId)
-      .single();
-
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
         { error: t('common.whatsappNotConfiguredDot') },
         { status: 400 },
@@ -130,15 +131,13 @@ export async function POST(request: Request) {
 
     // Mirror into DB. Empty emoji = removal.
     if (emoji === '') {
-      const { error: delError } = await supabase
-        .from('message_reactions')
-        .delete()
-        .eq('message_id', targetMessage.id)
-        .eq('actor_type', 'agent')
-        .eq('actor_id', userId);
-
-      if (delError) {
-        console.error('[whatsapp/react] DB delete failed:', delError.message);
+      try {
+        await asUser(userId, (db) => deleteAgentReaction(db, targetMessage.id, userId));
+      } catch (delError) {
+        console.error(
+          '[whatsapp/react] DB delete failed:',
+          delError instanceof Error ? delError.message : delError,
+        );
         return NextResponse.json(
           { error: t('react.dbDeleteFailed') },
           { status: 500 },
@@ -147,19 +146,20 @@ export async function POST(request: Request) {
     } else {
       // Upsert. The unique constraint (message_id, actor_type, actor_id)
       // lets us swap emoji in a single statement.
-      const { error: upsertError } = await supabase.from('message_reactions').upsert(
-        {
-          message_id: targetMessage.id,
-          conversation_id: targetMessage.conversation_id,
-          actor_type: 'agent',
-          actor_id: userId,
-          emoji,
-        },
-        { onConflict: 'message_id,actor_type,actor_id' },
-      );
-
-      if (upsertError) {
-        console.error('[whatsapp/react] DB upsert failed:', upsertError.message);
+      try {
+        await asUser(userId, (db) =>
+          upsertAgentReaction(db, {
+            message_id: targetMessage.id,
+            conversation_id: targetMessage.conversation_id,
+            actor_id: userId,
+            emoji,
+          }),
+        );
+      } catch (upsertError) {
+        console.error(
+          '[whatsapp/react] DB upsert failed:',
+          upsertError instanceof Error ? upsertError.message : upsertError,
+        );
         return NextResponse.json(
           { error: t('react.dbUpsertFailed') },
           { status: 500 },

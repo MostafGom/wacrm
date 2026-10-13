@@ -7,126 +7,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // send + persistence path — no inbound message required to bootstrap a thread.
 // ---------------------------------------------------------------------------
 
-// Records of what the route wrote, so we can assert the right rows landed.
-const conversationInserts: Array<Record<string, unknown>> = []
-const messageInserts: Array<Record<string, unknown>> = []
+const CONTACT_ID = '22222222-2222-4222-8222-222222222222'
+const CONV_NEW = '33333333-3333-4333-8333-333333333333'
+const CONV_EXISTING = '44444444-4444-4444-8444-444444444444'
 
-// Toggles for the per-test scenario.
-let existingConversation: Record<string, unknown> | null = null
-let contactRow: Record<string, unknown> | null = null
-// The caller's role, as `requireRole` reads it off the profile. Sending
-// requires 'agent'; 'viewer' must be refused before anything reaches Meta.
-let callerRole: string = 'admin'
-// A conversation created during the request becomes retrievable by id —
-// the shared send core re-loads the conversation (with its contact) from
-// just the id, so the mock must model insert-then-select-by-id.
-let createdConversation: Record<string, unknown> | null = null
+// Records of what the route wrote, so we can assert the right rows landed.
+const h = vi.hoisted(() => ({
+  conversationInserts: [] as Array<Record<string, unknown>>,
+  messageInserts: [] as Array<Record<string, unknown>>,
+  // Toggles for the per-test scenario.
+  existingConversation: null as Record<string, unknown> | null,
+  contactRow: null as Record<string, unknown> | null,
+  // The caller's role, as `requireRole` reads it off the profile. Sending
+  // requires 'agent'; 'viewer' must be refused before anything reaches Meta.
+  callerRole: 'admin',
+}))
 
 const CONTACT = {
-  id: 'contact-1',
+  id: CONTACT_ID,
   account_id: 'acct-1',
   phone: '+15551234567',
 }
-
-// Chainable Supabase mock. A fresh builder per `.from()` call tracks whether
-// `.insert()` ran so the terminal resolves to the inserted row for creates
-// and the canned select row otherwise.
-function makeSupabaseMock() {
-  function builder(table: string) {
-    let didInsert = false
-
-    const selectResult = () => {
-      switch (table) {
-        case 'profiles':
-          return {
-            data: { account_id: 'acct-1', account_role: callerRole },
-            error: null,
-          }
-        case 'accounts':
-          return { data: { id: 'acct-1', name: 'Acme' }, error: null }
-        case 'contacts':
-          return { data: contactRow, error: null }
-        case 'conversations':
-          // Once created this request, a by-id reload returns it (with
-          // its contact); otherwise fall back to the canned existing row.
-          return { data: createdConversation ?? existingConversation, error: null }
-        case 'whatsapp_config':
-          return {
-            data: {
-              id: 'cfg-1',
-              account_id: 'acct-1',
-              phone_number_id: 'PNID-1',
-              access_token: 'enc-token',
-            },
-            error: null,
-          }
-        case 'message_templates':
-          return { data: null, error: null }
-        default:
-          return { data: null, error: null }
-      }
-    }
-
-    const insertResult = () => {
-      switch (table) {
-        case 'conversations':
-          return {
-            data: {
-              id: 'conv-new',
-              account_id: 'acct-1',
-              contact_id: 'contact-1',
-              contact: CONTACT,
-            },
-            error: null,
-          }
-        case 'messages':
-          return { data: { id: 'msg-1' }, error: null }
-        default:
-          return { data: null, error: null }
-      }
-    }
-
-    const terminal = () =>
-      Promise.resolve(didInsert ? insertResult() : selectResult())
-
-    const b: Record<string, unknown> = {}
-    const chain = () => b
-    for (const m of ['select', 'eq', 'in', 'order', 'limit', 'update', 'delete']) {
-      b[m] = vi.fn(chain)
-    }
-    b.insert = vi.fn((payload: Record<string, unknown>) => {
-      didInsert = true
-      if (table === 'conversations') {
-        conversationInserts.push(payload)
-        createdConversation = {
-          id: 'conv-new',
-          account_id: 'acct-1',
-          contact_id: 'contact-1',
-          contact: CONTACT,
-        }
-      }
-      if (table === 'messages') messageInserts.push(payload)
-      return b
-    })
-    b.single = vi.fn(terminal)
-    b.maybeSingle = vi.fn(terminal)
-    b.then = (resolve: (v: unknown) => unknown) =>
-      resolve(didInsert ? insertResult() : selectResult())
-    return b
-  }
-
-  return {
-    auth: {
-      getUser: vi.fn(async () => ({
-        data: { user: { id: 'user-1' } },
-        error: null,
-      })),
-    },
-    from: vi.fn((table: string) => builder(table)),
-  }
-}
-
-let supabaseMock = makeSupabaseMock()
 
 // requireRole runs for real: session + profile come from these mocks,
 // with the role read from `callerRole` at call time.
@@ -138,27 +39,59 @@ vi.mock('@/server/repos/profiles', async () =>
     userId: 'user-1',
     accountId: 'acct-1',
     get role() {
-      return callerRole
+      return h.callerRole
     },
   }),
 )
 vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule())
+// requireRole still builds the transitional per-request client from the
+// session cookie; there is no request scope in a unit test.
+vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }))
 
-vi.mock('@/lib/supabase/server', () => ({
-  createClient: vi.fn(async () => supabaseMock),
+vi.mock('@/server/repos/contacts', () => ({
+  getContact: vi.fn(async () => h.contactRow ?? undefined),
+  updateContact: vi.fn(async () => undefined),
 }))
 
-vi.mock('@/lib/flows/admin-client', () => ({
-  supabaseAdmin: () => ({
-    from: () => {
-      const b: Record<string, unknown> = {}
-      const chain = () => b
-      for (const m of ['update', 'eq', 'select']) b[m] = vi.fn(chain)
-      b.then = (resolve: (v: unknown) => unknown) =>
-        resolve({ data: null, error: null })
-      return b
+vi.mock('@/server/repos/conversations', () => ({
+  conversationIdInAccount: vi.fn(async (_db: unknown, _a: string, id: string) =>
+    h.existingConversation?.id === id ? id : undefined,
+  ),
+  // Find-or-create: reuse the existing row, otherwise "insert" one.
+  findOrCreateConversationId: vi.fn(
+    async (_db: unknown, accountId: string, contactId: string, userId: string) => {
+      if (h.existingConversation) return h.existingConversation.id as string
+      h.conversationInserts.push({ account_id: accountId, contact_id: contactId, user_id: userId })
+      h.existingConversation = { id: CONV_NEW, contact_id: contactId }
+      return CONV_NEW
     },
+  ),
+  // The shared send core re-loads the conversation (with its contact)
+  // from just the id.
+  getConversationForSend: vi.fn(async () =>
+    h.existingConversation ? { ...h.existingConversation, contact: CONTACT } : undefined,
+  ),
+  touchConversationLastMessage: vi.fn(async () => undefined),
+}))
+
+vi.mock('@/server/repos/messages', () => ({
+  getWhatsAppSendConfig: vi.fn(async () => ({
+    id: 'cfg-1',
+    phone_number_id: 'PNID-1',
+    access_token: 'enc-token',
+    user_id: 'user-1',
+  })),
+  getReplyParent: vi.fn(async () => undefined),
+  updateWhatsAppAccessToken: vi.fn(async () => undefined),
+  insertOutboundMessage: vi.fn(async (_db: unknown, values: Record<string, unknown>) => {
+    h.messageInserts.push({ ...values, sender_type: 'agent' })
+    return { id: 'msg-1' }
   }),
+  pauseActiveFlowRunsForContact: vi.fn(async () => undefined),
+}))
+
+vi.mock('@/server/repos/templates', () => ({
+  listTemplatesByName: vi.fn(async () => []),
 }))
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
@@ -184,7 +117,7 @@ function postContactTemplate(overrides: Record<string, unknown> = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contact_id: 'contact-1',
+        contact_id: CONTACT_ID,
         message_type: 'template',
         template_name: 'order_update',
         template_language: 'en_US',
@@ -198,13 +131,11 @@ function postContactTemplate(overrides: Record<string, unknown> = {}) {
 
 describe('POST /api/whatsapp/send — contact_id template path', () => {
   beforeEach(() => {
-    conversationInserts.length = 0
-    messageInserts.length = 0
-    existingConversation = null
-    createdConversation = null
-    contactRow = CONTACT
-    callerRole = 'admin'
-    supabaseMock = makeSupabaseMock()
+    h.conversationInserts.length = 0
+    h.messageInserts.length = 0
+    h.existingConversation = null
+    h.contactRow = CONTACT
+    h.callerRole = 'admin'
     sendTemplateMessage.mockClear()
   })
 
@@ -221,10 +152,10 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
     expect(json.whatsapp_message_id).toBe('wamid-1')
 
     // A conversation was created for this contact.
-    expect(conversationInserts).toHaveLength(1)
-    expect(conversationInserts[0]).toMatchObject({
+    expect(h.conversationInserts).toHaveLength(1)
+    expect(h.conversationInserts[0]).toMatchObject({
       account_id: 'acct-1',
-      contact_id: 'contact-1',
+      contact_id: CONTACT_ID,
     })
 
     // The template was sent to the contact's number.
@@ -238,9 +169,9 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
     expect(args.templateName).toBe('order_update')
 
     // The outbound message was persisted under the new conversation.
-    expect(messageInserts).toHaveLength(1)
-    expect(messageInserts[0]).toMatchObject({
-      conversation_id: 'conv-new',
+    expect(h.messageInserts).toHaveLength(1)
+    expect(h.messageInserts[0]).toMatchObject({
+      conversation_id: CONV_NEW,
       content_type: 'template',
       template_name: 'order_update',
       sender_type: 'agent',
@@ -248,22 +179,22 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
   })
 
   it('reuses an existing conversation instead of creating a duplicate', async () => {
-    existingConversation = {
-      id: 'conv-existing',
+    h.existingConversation = {
+      id: CONV_EXISTING,
       account_id: 'acct-1',
-      contact_id: 'contact-1',
+      contact_id: CONTACT_ID,
       contact: CONTACT,
     }
 
     const res = await postContactTemplate()
     expect(res.status).toBe(200)
 
-    expect(conversationInserts).toHaveLength(0)
-    expect(messageInserts[0]).toMatchObject({ conversation_id: 'conv-existing' })
+    expect(h.conversationInserts).toHaveLength(0)
+    expect(h.messageInserts[0]).toMatchObject({ conversation_id: CONV_EXISTING })
   })
 
   it('404s when the contact is not in the caller account', async () => {
-    contactRow = null
+    h.contactRow = null
 
     const res = await postContactTemplate()
     const json = await res.json()
@@ -287,18 +218,16 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
 
 describe('POST /api/whatsapp/send — role enforcement', () => {
   beforeEach(() => {
-    conversationInserts.length = 0
-    messageInserts.length = 0
-    existingConversation = {
-      id: 'conv-existing',
+    h.conversationInserts.length = 0
+    h.messageInserts.length = 0
+    h.existingConversation = {
+      id: CONV_EXISTING,
       account_id: 'acct-1',
-      contact_id: 'contact-1',
+      contact_id: CONTACT_ID,
       contact: CONTACT,
     }
-    createdConversation = null
-    contactRow = CONTACT
-    callerRole = 'admin'
-    supabaseMock = makeSupabaseMock()
+    h.contactRow = CONTACT
+    h.callerRole = 'admin'
     sendTemplateMessage.mockClear()
   })
 
@@ -312,17 +241,17 @@ describe('POST /api/whatsapp/send — role enforcement', () => {
     // the message INSERT, but the send core calls Meta first, so the
     // customer still received a real WhatsApp message that RLS could not
     // un-send. The gate has to come before any outbound call.
-    callerRole = 'viewer'
+    h.callerRole = 'viewer'
 
     const res = await postContactTemplate()
 
     expect(res.status).toBe(403)
     expect(sendTemplateMessage).not.toHaveBeenCalled()
-    expect(messageInserts).toHaveLength(0)
+    expect(h.messageInserts).toHaveLength(0)
   })
 
   it('allows an agent through', async () => {
-    callerRole = 'agent'
+    h.callerRole = 'agent'
 
     const res = await postContactTemplate()
 

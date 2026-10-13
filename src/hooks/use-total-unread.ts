@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { listUnreadCounts } from "@/lib/inbox/inbox-api";
+import { createChannel } from "@/lib/realtime/client";
 import type { Conversation } from "@/types";
 
 /**
@@ -20,20 +21,16 @@ export function useTotalUnread(): number {
   const countsRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    const supabase = createClient();
     let cancelled = false;
 
-    // Initial load. RLS scopes this to the signed-in user automatically —
-    // no explicit user_id filter needed here.
+    // Initial load — the route scopes it to the caller's account.
     (async () => {
-      const { data, error } = await supabase
-        .from("conversations")
-        .select("id, unread_count");
-      if (cancelled || error || !data) return;
+      const { data, error } = await listUnreadCounts();
+      if (cancelled || error) return;
 
       const map = new Map<string, number>();
       let sum = 0;
-      for (const row of data as { id: string; unread_count: number }[]) {
+      for (const row of data.counts) {
         const n = row.unread_count ?? 0;
         map.set(row.id, n);
         if (n > 0) sum += 1;
@@ -42,8 +39,7 @@ export function useTotalUnread(): number {
       setTotal(sum);
     })();
 
-    const channel = supabase
-      .channel("total-unread-realtime")
+    const channel = createChannel("total-unread-realtime")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "conversations" },
@@ -66,7 +62,7 @@ export function useTotalUnread(): number {
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
     };
   }, []);
 

@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
+  DummyDriver,
+  Kysely,
+  PostgresAdapter,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+} from 'kysely';
+import {
   parseListParams,
   encodeCursor,
   decodeCursor,
-  keysetFilter,
+  keysetAfter,
   buildPage,
   DEFAULT_LIMIT,
   MAX_LIMIT,
@@ -63,7 +70,7 @@ describe('encode/decodeCursor round-trip', () => {
 
   it('rejects a crafted cursor whose id is not a UUID (filter-injection guard)', () => {
     // A hand-built cursor trying to smuggle PostgREST filter syntax
-    // through keysetFilter must be refused, not decoded.
+    // must be refused, not decoded.
     const evil = Buffer.from(
       '2026-01-01T00:00:00Z|x),or(account_id.neq.0',
       'utf8'
@@ -80,15 +87,31 @@ describe('encode/decodeCursor round-trip', () => {
   });
 });
 
-describe('keysetFilter', () => {
-  it('is null on the first page', () => {
-    expect(keysetFilter(null)).toBeNull();
+describe('keysetAfter', () => {
+  // Compile-only Kysely (no database) to inspect the generated SQL.
+  const db = new Kysely<{ contacts: { id: string; created_at: string } }>({
+    dialect: {
+      createAdapter: () => new PostgresAdapter(),
+      createDriver: () => new DummyDriver(),
+      createIntrospector: (k) => new PostgresIntrospector(k),
+      createQueryCompiler: () => new PostgresQueryCompiler(),
+    },
   });
 
-  it('walks strictly past the cursor row (older, or same-ts smaller id)', () => {
-    expect(keysetFilter({ createdAt: '2026-01-01T00:00:00Z', id: 'x' })).toBe(
-      'created_at.lt.2026-01-01T00:00:00Z,and(created_at.eq.2026-01-01T00:00:00Z,id.lt.x)'
+  it('walks strictly past the cursor row (older, or same-ts smaller id) with bound values', () => {
+    const cursor = {
+      createdAt: '2026-01-01T00:00:00Z',
+      id: '11111111-1111-4111-8111-111111111111',
+    };
+    const compiled = db
+      .selectFrom('contacts')
+      .select('id')
+      .where(keysetAfter('contacts.created_at', 'contacts.id', cursor))
+      .compile();
+    expect(compiled.sql).toContain(
+      '("contacts"."created_at" < $1::timestamptz OR ("contacts"."created_at" = $2::timestamptz AND "contacts"."id" < $3::uuid))'
     );
+    expect(compiled.parameters).toEqual([cursor.createdAt, cursor.createdAt, cursor.id]);
   });
 });
 

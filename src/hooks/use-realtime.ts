@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { createChannel } from "@/lib/realtime/client";
+import type { RealtimeChannel } from "@/lib/realtime/types";
 import type { Message, Conversation } from "@/types";
-import type { RealtimeChannel } from "@/lib/db";
 
 interface RealtimeEvent<T> {
   eventType: "INSERT" | "UPDATE" | "DELETE";
@@ -30,7 +30,7 @@ export function useRealtime({
   // Store latest callbacks in refs to avoid re-subscribing when the
   // parent re-renders with fresh closures. Assigned inside an effect
   // so the mutation doesn't happen during render (React 19's refs
-  // rule) — subscribers only read `.current` inside async Realtime
+  // rule) — subscribers only read `.current` inside async realtime
   // callbacks, which always run after the render that updates it.
   const onMessageRef = useRef(onMessageEvent);
   const onConversationRef = useRef(onConversationEvent);
@@ -42,10 +42,7 @@ export function useRealtime({
   useEffect(() => {
     if (!enabled) return;
 
-    const supabase = createClient();
-
-    const channel = supabase
-      .channel(channelName)
+    const channel = createChannel(channelName)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "messages" },
@@ -69,13 +66,15 @@ export function useRealtime({
         }
       )
       .subscribe((status) => {
+        // SUBSCRIBED on every (re)connect, CHANNEL_ERROR on a drop — the
+        // inbox page turns the false → true edge into a resync.
         setIsConnected(status === "SUBSCRIBED");
       });
 
     channelRef.current = channel;
 
     return () => {
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
       channelRef.current = null;
       setIsConnected(false);
     };
@@ -83,8 +82,7 @@ export function useRealtime({
 
   const unsubscribe = useCallback(() => {
     if (channelRef.current) {
-      const supabase = createClient();
-      supabase.removeChannel(channelRef.current);
+      void channelRef.current.unsubscribe();
       channelRef.current = null;
       setIsConnected(false);
     }

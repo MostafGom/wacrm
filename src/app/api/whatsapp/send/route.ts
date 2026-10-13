@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
+import { asUser, userRunner } from '@/server/db'
+import { getContact } from '@/server/repos/contacts'
+import {
+  conversationIdInAccount,
+  findOrCreateConversationId,
+} from '@/server/repos/conversations'
+import { isUuid } from '@/server/http'
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -35,7 +41,7 @@ export async function POST(request: Request) {
     // still delivered a real WhatsApp message to the customer and merely
     // failed to record it (surfacing as "sent to Meta but failed to save
     // to DB"). RLS can't un-send that, so the role check belongs here.
-    const { supabase, accountId, userId } = await requireRole('agent')
+    const { accountId, userId } = await requireRole('agent')
 
     // Per-user rate limit. Bucket key is scoped to this route so
     // `/broadcast` has an independent budget.
@@ -98,43 +104,49 @@ export async function POST(request: Request) {
     let conversationId: string | null = null
 
     if (conversationIdInput) {
-      const { data, error: convError } = await supabase
-        .from('conversations')
-        .select('id')
-        .eq('id', conversationIdInput)
-        .eq('account_id', accountId)
-        .single()
+      const found = isUuid(conversationIdInput)
+        ? await asUser(userId, (db) =>
+            conversationIdInAccount(db, accountId, conversationIdInput)
+          )
+        : undefined
 
-      if (convError || !data) {
+      if (!found) {
         return NextResponse.json(
           { error: t('common.conversationNotFound') },
           { status: 404 }
         )
       }
-      conversationId = data.id
+      conversationId = found
     } else {
       // contact_id path: verify the contact is in this account first so a
       // caller can't open a conversation against someone else's contact.
-      const { data: contactRow, error: contactErr } = await supabase
-        .from('contacts')
-        .select('id')
-        .eq('id', contact_id)
-        .eq('account_id', accountId)
-        .maybeSingle()
+      const contactRow = isUuid(contact_id)
+        ? await asUser(userId, (db) => getContact(db, accountId, contact_id))
+        : undefined
 
-      if (contactErr || !contactRow) {
+      if (!contactRow) {
         return NextResponse.json(
           { error: t('send.contactNotFound') },
           { status: 404 }
         )
       }
 
-      const resolved = await findOrCreateConversation(
-        supabase,
-        accountId,
-        userId,
-        contact_id
-      )
+      // Mirrors the webhook's find-or-create so an inbound-then-outbound
+      // (or outbound-first) sequence converges on a single thread per
+      // contact. Runs under the caller's RLS — the conversations_insert
+      // policy requires account agent membership, which the caller
+      // already is.
+      let resolved: string | undefined
+      try {
+        resolved = await asUser(userId, (db) =>
+          findOrCreateConversationId(db, accountId, contactRow.id, userId)
+        )
+      } catch (err) {
+        console.error(
+          'Error creating conversation for contact send:',
+          err instanceof Error ? err.message : err
+        )
+      }
       if (!resolved) {
         return NextResponse.json(
           { error: t('send.openConversationFailed') },
@@ -156,7 +168,7 @@ export async function POST(request: Request) {
     // `SendMessageError` carries a machine code + HTTP status; the
     // dashboard maps it to the internal `{ error }` shape.
     try {
-      const result = await sendMessageToConversation(supabase, accountId, {
+      const result = await sendMessageToConversation(userRunner(userId), accountId, {
         conversationId,
         messageType: message_type,
         contentText: content_text,
@@ -190,46 +202,4 @@ export async function POST(request: Request) {
     console.error('Error in WhatsApp send POST:', error)
     return toErrorResponse(error)
   }
-}
-
-type SendSupabase = Awaited<ReturnType<typeof createClient>>
-
-/**
- * Return the contact's conversation id in this account, creating one if
- * it doesn't exist yet. Mirrors the webhook's find-or-create so an
- * inbound-then-outbound (or outbound-first) sequence converges on a single
- * thread per contact. Runs under the caller's RLS — the conversations_insert
- * policy requires account agent membership, which the caller already is.
- */
-async function findOrCreateConversation(
-  supabase: SendSupabase,
-  accountId: string,
-  userId: string,
-  contactId: string,
-): Promise<string | null> {
-  const { data: existing } = await supabase
-    .from('conversations')
-    .select('id')
-    .eq('account_id', accountId)
-    .eq('contact_id', contactId)
-    .maybeSingle()
-
-  if (existing) return existing.id
-
-  const { data: created, error } = await supabase
-    .from('conversations')
-    .insert({
-      account_id: accountId,
-      user_id: userId,
-      contact_id: contactId,
-    })
-    .select('id')
-    .single()
-
-  if (error) {
-    console.error('Error creating conversation for contact send:', error.message)
-    return null
-  }
-
-  return created.id
 }

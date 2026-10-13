@@ -1,270 +1,213 @@
-import { describe, expect, it } from 'vitest';
-import type { SupabaseClient } from '@/lib/db';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Runner } from '@/server/db';
 
-import { vi } from 'vitest';
+// ------------------------------------------------------------
+// The resolver orchestrates repository calls through a Runner; each
+// repo is faked here from a per-test script. The SQL itself (ON
+// CONFLICT, oldest-first lookup, the unique-index race) is covered by
+// src/server/repos/conversations.int.test.ts against real Postgres.
+// ------------------------------------------------------------
 
-// Contact lookups and the audit owner go through repositories (asService);
-// they read the same per-test script as the chainable stub below.
-const current = vi.hoisted(() => ({
-  script: null as null | {
-    config?: { user_id: string } | null;
-    contactCandidates?: { id: string; phone: string }[];
-    contactCandidatesByCall?: { id: string; phone: string }[][];
-  },
-  likeCalls: 0,
+type ContactRow = { id: string; phone: string; name?: string | null };
+
+interface Script {
+  config?: { id: string } | null;
+  owner?: string | null;
+  /** findExistingContact results per call (last one repeats). */
+  existingByCall?: (ContactRow | null)[];
+  /** insertContact result: the new id, or null for "ON CONFLICT kept another row". */
+  insertedContactId?: string | null;
+  insertContactThrows?: boolean;
+  /** findOrCreateConversationId result, or null for "nothing". */
+  conversationId?: string | null;
+}
+
+const h = vi.hoisted(() => ({
+  script: {} as Script,
+  findCalls: 0,
+  inserts: [] as Record<string, unknown>[],
+  updates: [] as Record<string, unknown>[],
+  convArgs: [] as unknown[][],
 }));
-vi.mock('@/server/db', async () => (await import('@/test/auth-mocks')).dbModule());
-vi.mock('@/lib/contacts/dedupe', async (importOriginal) => {
-  const real = await importOriginal<typeof import('@/lib/contacts/dedupe')>();
-  const { phonesMatch } = await import('@/lib/whatsapp/phone-utils');
-  return {
-    ...real,
-    findExistingContact: async (_db: unknown, _accountId: string, phone: string) => {
-      const s = current.script ?? {};
-      const list = s.contactCandidatesByCall
-        ? (s.contactCandidatesByCall[current.likeCalls] ?? [])
-        : (s.contactCandidates ?? []);
-      current.likeCalls++;
-      return list.find((c) => phonesMatch(c.phone, phone)) ?? null;
-    },
-  };
-});
+
+vi.mock('@/server/repos/messages', () => ({
+  getWhatsAppSendConfig: async () => h.script.config ?? undefined,
+}));
+
 vi.mock('@/lib/api/v1/contacts', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/lib/api/v1/contacts')>();
   return {
     ...real,
     resolveAuditUserId: async () => {
-      const owner = current.script?.config?.user_id;
-      if (!owner) throw new real.ContactError('Account owner could not be resolved', 500);
-      return owner;
+      if (!h.script.owner) {
+        throw new real.ContactError('Account owner could not be resolved', 500);
+      }
+      return h.script.owner;
     },
   };
 });
 
+vi.mock('@/lib/contacts/dedupe', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/contacts/dedupe')>()),
+  findExistingContact: async () => {
+    const list = h.script.existingByCall ?? [null];
+    const row = list[Math.min(h.findCalls, list.length - 1)];
+    h.findCalls++;
+    return row;
+  },
+}));
+
+vi.mock('@/server/repos/contacts', () => ({
+  insertContact: async (_db: unknown, values: Record<string, unknown>) => {
+    if (h.script.insertContactThrows) throw new Error('boom');
+    h.inserts.push(values);
+    return h.script.insertedContactId ? { id: h.script.insertedContactId } : undefined;
+  },
+  updateContact: async (
+    _db: unknown,
+    _accountId: string,
+    id: string,
+    patch: Record<string, unknown>
+  ) => {
+    h.updates.push({ id, ...patch });
+  },
+}));
+
+vi.mock('@/server/repos/conversations', () => ({
+  findOrCreateConversationId: async (...args: unknown[]) => {
+    h.convArgs.push(args.slice(1));
+    return h.script.conversationId ?? undefined;
+  },
+}));
+
 import { resolveConversationByPhone } from './resolve-conversation';
 import { SendMessageError } from './send-message';
 
-// ------------------------------------------------------------
-// Chainable Supabase stub, scripted per table. Terminal methods
-// (like/maybeSingle/single) resolve to configured data; the builder
-// itself is thenable so an awaited `update().eq()` resolves cleanly.
-// ------------------------------------------------------------
-type ContactRow = { id: string; phone: string; name?: string | null };
+const run: Runner = (fn) => fn({} as never);
+const noDb: Runner = () => {
+  throw new Error('should not query');
+};
 
-interface Script {
-  config?: { user_id: string } | null; // whatsapp_config.maybeSingle
-  contactCandidates?: ContactRow[]; // contacts .like (same every call)
-  /** Per-call `.like` results — overrides contactCandidates. Lets a
-   *  test simulate "miss, then hit" for the unique-race path. */
-  contactCandidatesByCall?: ContactRow[][];
-  insertedContactId?: string; // contacts insert -> single
-  insertContactError?: { code?: string } | null;
-  /** Conversation lookup result (oldest-first `.order().limit(1)`).
-   *  A single row or null; wrapped into a one-element array internally. */
-  existingConversation?: { id: string } | null; // conversations select.limit(1)
-  /** Per-call conversation lookup results — overrides existingConversation.
-   *  Lets a test simulate "miss, then hit" for the unique-race path. */
-  existingConversationByCall?: (({ id: string } | null))[];
-  insertedConversationId?: string; // conversations insert -> single
-  insertConversationError?: { code?: string } | null;
-}
-
-function makeDb(script: Script): SupabaseClient {
-  current.script = script;
-  current.likeCalls = 0;
-  let table = '';
-  let mode: 'select' | 'insert' | 'update' = 'select';
-  let likeCalls = 0;
-  let convLookupCalls = 0;
-
-  const builder: Record<string, unknown> = {
-    select: () => builder,
-    insert: () => {
-      mode = 'insert';
-      return builder;
-    },
-    update: () => {
-      mode = 'update';
-      return builder;
-    },
-    eq: () => builder,
-    order: () => builder,
-    limit: () => {
-      // Only the conversation lookup terminates on `.limit(1)`.
-      if (table === 'conversations' && mode === 'select') {
-        const row = script.existingConversationByCall
-          ? (script.existingConversationByCall[convLookupCalls] ?? null)
-          : (script.existingConversation ?? null);
-        convLookupCalls++;
-        return Promise.resolve({ data: row ? [row] : [], error: null });
-      }
-      return Promise.resolve({ data: [], error: null });
-    },
-    like: () => {
-      const data = script.contactCandidatesByCall
-        ? (script.contactCandidatesByCall[likeCalls] ?? [])
-        : (script.contactCandidates ?? []);
-      likeCalls++;
-      return Promise.resolve({ data, error: null });
-    },
-    maybeSingle: () => {
-      if (table === 'whatsapp_config')
-        return Promise.resolve({ data: script.config ?? null, error: null });
-      return Promise.resolve({ data: null, error: null });
-    },
-    single: () => {
-      if (table === 'contacts' && mode === 'insert') {
-        if (script.insertContactError)
-          return Promise.resolve({
-            data: null,
-            error: script.insertContactError,
-          });
-        return Promise.resolve({
-          data: { id: script.insertedContactId },
-          error: null,
-        });
-      }
-      if (table === 'conversations' && mode === 'insert') {
-        if (script.insertConversationError)
-          return Promise.resolve({
-            data: null,
-            error: script.insertConversationError,
-          });
-        return Promise.resolve({
-          data: { id: script.insertedConversationId },
-          error: null,
-        });
-      }
-      return Promise.resolve({ data: null, error: null });
-    },
-    // Thenable: `await db.from().update().eq()` lands here.
-    then: (resolve: (v: { data: null; error: null }) => void) =>
-      resolve({ data: null, error: null }),
-  };
-
-  return {
-    from: (t: string) => {
-      table = t;
-      mode = 'select';
-      return builder;
-    },
-  } as unknown as SupabaseClient;
-}
+beforeEach(() => {
+  h.script = {};
+  h.findCalls = 0;
+  h.inserts = [];
+  h.updates = [];
+  h.convArgs = [];
+});
 
 describe('resolveConversationByPhone', () => {
   it('rejects an invalid phone before any DB call', async () => {
-    const db = {
-      from() {
-        throw new Error('should not query');
-      },
-    } as unknown as SupabaseClient;
     await expect(
-      resolveConversationByPhone(db, 'acct', 'not-a-phone')
+      resolveConversationByPhone(noDb, 'acct', 'not-a-phone')
     ).rejects.toBeInstanceOf(SendMessageError);
   });
 
   it('rejects a national-format number (no leading +) before any DB call (#586)', async () => {
-    const db = {
-      from() {
-        throw new Error('should not query');
-      },
-    } as unknown as SupabaseClient;
     // Would otherwise be sent to +41 55 555 12 12 (Switzerland) and
     // reported as a successful send.
     await expect(
-      resolveConversationByPhone(db, 'acct', '4155551212')
+      resolveConversationByPhone(noDb, 'acct', '4155551212')
     ).rejects.toMatchObject({ code: 'bad_request', status: 400 });
     // Digits with a country code but no `+` are indistinguishable from
     // the above, so they are refused as well.
     await expect(
-      resolveConversationByPhone(db, 'acct', '14155550123')
+      resolveConversationByPhone(noDb, 'acct', '14155550123')
     ).rejects.toMatchObject({ code: 'bad_request', status: 400 });
   });
 
-  it('fails with whatsapp_not_configured when no config owner exists', async () => {
-    const db = makeDb({ config: null });
-    await resolveConversationByPhone(db, 'acct', '+14155550123').catch(
-      (e: SendMessageError) => {
-        expect(e.code).toBe('whatsapp_not_configured');
-        expect(e.status).toBe(400);
-      }
-    );
+  it('fails with whatsapp_not_configured (and creates nothing) when the account has no config', async () => {
+    h.script = { config: null, owner: 'owner-1' };
     await expect(
-      resolveConversationByPhone(db, 'acct', '+14155550123')
-    ).rejects.toBeInstanceOf(SendMessageError);
+      resolveConversationByPhone(run, 'acct', '+14155550123')
+    ).rejects.toMatchObject({ code: 'whatsapp_not_configured', status: 400 });
+    expect(h.inserts).toHaveLength(0);
+    expect(h.convArgs).toHaveLength(0);
+  });
+
+  it('maps an unresolvable audit owner to a db_error SendMessageError', async () => {
+    h.script = { config: { id: 'cfg' }, owner: null };
+    await expect(
+      resolveConversationByPhone(run, 'acct', '+14155550123')
+    ).rejects.toMatchObject({ code: 'db_error', status: 500 });
   });
 
   it('returns the existing contact + conversation without creating', async () => {
-    const db = makeDb({
-      config: { user_id: 'owner-1' },
-      contactCandidates: [{ id: 'c1', phone: '14155550123' }],
-      existingConversation: { id: 'cv1' },
-    });
-    const res = await resolveConversationByPhone(
-      db,
-      'acct',
-      '+1 (415) 555-0123'
-    );
-    expect(res).toEqual({
+    h.script = {
+      config: { id: 'cfg' },
+      owner: 'owner-1',
+      existingByCall: [{ id: 'c1', phone: '14155550123', name: 'Old' }],
       conversationId: 'cv1',
-      contactId: 'c1',
-      contactCreated: false,
-    });
+    };
+    const res = await resolveConversationByPhone(run, 'acct', '+1 (415) 555-0123');
+    expect(res).toEqual({ conversationId: 'cv1', contactId: 'c1', contactCreated: false });
+    expect(h.inserts).toHaveLength(0);
+    // No name given → the existing contact is left alone.
+    expect(h.updates).toHaveLength(0);
+    expect(h.convArgs[0]).toEqual(['acct', 'c1', 'owner-1']);
   });
 
-  it('creates contact + conversation when none exist', async () => {
-    const db = makeDb({
-      config: { user_id: 'owner-1' },
-      contactCandidates: [],
+  it('renames an existing contact when a different name is passed', async () => {
+    h.script = {
+      config: { id: 'cfg' },
+      owner: 'owner-1',
+      existingByCall: [{ id: 'c1', phone: '14155550123', name: 'Old' }],
+      conversationId: 'cv1',
+    };
+    await resolveConversationByPhone(run, 'acct', '+14155550123', 'New');
+    expect(h.updates).toEqual([{ id: 'c1', name: 'New' }]);
+  });
+
+  it('creates contact + conversation when none exist, attributed to the audit owner', async () => {
+    h.script = {
+      config: { id: 'cfg' },
+      owner: 'owner-1',
+      existingByCall: [null],
       insertedContactId: 'c2',
-      existingConversation: null,
-      insertedConversationId: 'cv2',
-    });
-    const res = await resolveConversationByPhone(
-      db,
-      'acct',
-      '+14155550199',
-      'Jane'
-    );
-    expect(res).toEqual({
       conversationId: 'cv2',
-      contactId: 'c2',
-      contactCreated: true,
+    };
+    const res = await resolveConversationByPhone(run, 'acct', '+14155550199', 'Jane');
+    expect(res).toEqual({ conversationId: 'cv2', contactId: 'c2', contactCreated: true });
+    expect(h.inserts[0]).toMatchObject({
+      account_id: 'acct',
+      user_id: 'owner-1',
+      phone: '14155550199',
+      name: 'Jane',
     });
+    expect(h.convArgs[0]).toEqual(['acct', 'c2', 'owner-1']);
   });
 
   it('re-resolves an existing contact when the insert loses a unique race', async () => {
-    // First lookup misses (→ we attempt an insert), the insert hits a
-    // 23505 unique violation, and the post-race re-lookup now returns
-    // the row a concurrent writer created.
-    const db = makeDb({
-      config: { user_id: 'owner-1' },
-      contactCandidatesByCall: [[], [{ id: 'c-raced', phone: '14155550123' }]],
-      insertContactError: { code: '23505' },
-      existingConversation: { id: 'cv-raced' },
-    });
-    const res = await resolveConversationByPhone(db, 'acct', '+14155550123');
-    expect(res.contactId).toBe('c-raced');
-    expect(res.contactCreated).toBe(false);
-    expect(res.conversationId).toBe('cv-raced');
+    // First lookup misses (→ we attempt an insert), the insert is a
+    // no-op (ON CONFLICT DO NOTHING — a concurrent writer won), and the
+    // post-race re-lookup returns the row the other writer created.
+    h.script = {
+      config: { id: 'cfg' },
+      owner: 'owner-1',
+      existingByCall: [null, { id: 'c-raced', phone: '14155550123' }],
+      insertedContactId: null,
+      conversationId: 'cv-raced',
+    };
+    const res = await resolveConversationByPhone(run, 'acct', '+14155550123');
+    expect(res).toEqual({ conversationId: 'cv-raced', contactId: 'c-raced', contactCreated: false });
   });
 
-  it('re-resolves the conversation when the insert loses a unique race', async () => {
-    // Existing contact, conversation lookup misses first (→ attempt an
-    // insert), the insert hits a 23505 from a concurrent create, and the
-    // post-race re-lookup returns the winning conversation — no duplicate
-    // conversation is created (issue #363).
-    const db = makeDb({
-      config: { user_id: 'owner-1' },
-      contactCandidates: [{ id: 'c1', phone: '14155550123' }],
-      existingConversationByCall: [null, { id: 'cv-raced' }],
-      insertConversationError: { code: '23505' },
-    });
-    const res = await resolveConversationByPhone(db, 'acct', '+14155550123');
-    expect(res).toEqual({
-      conversationId: 'cv-raced',
-      contactId: 'c1',
-      contactCreated: false,
-    });
+  it('fails with db_error when the contact insert errors', async () => {
+    h.script = { config: { id: 'cfg' }, owner: 'owner-1', existingByCall: [null], insertContactThrows: true };
+    await expect(
+      resolveConversationByPhone(run, 'acct', '+14155550123')
+    ).rejects.toMatchObject({ code: 'db_error', message: 'Failed to create contact' });
+  });
+
+  it('fails with db_error when no conversation can be resolved', async () => {
+    h.script = {
+      config: { id: 'cfg' },
+      owner: 'owner-1',
+      existingByCall: [{ id: 'c1', phone: '14155550123' }],
+      conversationId: null,
+    };
+    await expect(
+      resolveConversationByPhone(run, 'acct', '+14155550123')
+    ).rejects.toMatchObject({ code: 'db_error', message: 'Failed to create conversation' });
   });
 });

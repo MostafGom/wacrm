@@ -17,6 +17,8 @@
 // clients pass it back verbatim and never parse it.
 // ============================================================
 
+import { sql, type RawBuilder } from 'kysely';
+
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 100;
 
@@ -59,11 +61,10 @@ export function encodeCursor(row: { created_at: string; id: string }): string {
 
 // A cursor is only ever minted by `encodeCursor` from a real row's
 // `created_at` (ISO timestamp) + `id` (UUID). We re-validate both on
-// decode so a hand-crafted cursor can't smuggle PostgREST filter
-// syntax into `keysetFilter`'s `.or()` string (the values are
-// interpolated raw). Anything that doesn't look server-issued is
-// treated as "no cursor" — the documented tolerance is to restart
-// from the first page, never to run an attacker-shaped query.
+// decode: the values are bind parameters in `keysetAfter`, but a
+// malformed one would fail the `::timestamptz` / `::uuid` cast. Anything
+// that doesn't look server-issued is treated as "no cursor" — the
+// documented tolerance is to restart from the first page.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -77,8 +78,7 @@ export function decodeCursor(value: string | null): Cursor | null {
     const createdAt = decoded.slice(0, sep);
     const id = decoded.slice(sep + 1);
     // Reject anything that isn't a plausible server-issued cursor: an
-    // ISO-8601 timestamp and a UUID. This is what keeps the raw
-    // interpolation in `keysetFilter` safe.
+    // ISO-8601 timestamp and a UUID (what `keysetAfter` casts them to).
     if (!UUID_RE.test(id)) return null;
     const ts = Date.parse(createdAt);
     if (Number.isNaN(ts)) return null;
@@ -89,21 +89,23 @@ export function decodeCursor(value: string | null): Cursor | null {
 }
 
 /**
- * PostgREST `.or()` expression that walks *past* the cursor row under
- * a `(created_at desc, id desc)` ordering: strictly-older rows, plus
- * same-timestamp rows with a smaller id (the tie-breaker). Returns
- * null on the first page. Apply as:
+ * Kysely condition that walks *past* the cursor row under a
+ * `(created_at desc, id desc)` ordering: strictly-older rows, plus
+ * same-timestamp rows with a smaller id (the tie-breaker). The cursor
+ * values are bind parameters. Apply as:
  *
- *   let q = db.from('contacts').select('*').eq('account_id', accountId)
- *     .order('created_at', { ascending: false })
- *     .order('id', { ascending: false })
- *     .limit(limit + 1)          // fetch one extra to detect a next page
- *   const f = keysetFilter(cursor)
- *   if (f) q = q.or(f)
+ *   let q = db.selectFrom('contacts').selectAll().where('account_id', '=', accountId)
+ *   if (cursor) q = q.where(keysetAfter('contacts.created_at', 'contacts.id', cursor))
+ *   q.orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit + 1)   // one extra → next page?
  */
-export function keysetFilter(cursor: Cursor | null): string | null {
-  if (!cursor) return null;
-  return `created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`;
+export function keysetAfter(
+  createdAtColumn: string,
+  idColumn: string,
+  cursor: Cursor
+): RawBuilder<boolean> {
+  const createdAt = sql.ref(createdAtColumn);
+  const id = sql.ref(idColumn);
+  return sql<boolean>`(${createdAt} < ${cursor.createdAt}::timestamptz OR (${createdAt} = ${cursor.createdAt}::timestamptz AND ${id} < ${cursor.id}::uuid))`;
 }
 
 /**

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { listApprovedTemplates } from "@/lib/inbox/inbox-api";
 import type { MessageTemplate } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -94,35 +94,19 @@ export function TemplatePicker({
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        if (!cancelled) {
-          setTemplates([]);
-          setLoading(false);
-        }
-        return;
-      }
-
-      // Scope by RLS (message_templates_select → is_account_member), NOT by
-      // user_id. Templates are account-owned, so filtering on the caller's
-      // user_id hid templates that a teammate created — leaving them unable
-      // to send approved templates in a shared account.
-      const { data, error } = await supabase
-        .from("message_templates")
-        .select("*")
-        .eq("status", "APPROVED")
-        .order("created_at", { ascending: false });
+      // Scoped by the caller's ACCOUNT server-side, NOT by user_id.
+      // Templates are account-owned, so filtering on the caller's user_id
+      // hid templates that a teammate created — leaving them unable to
+      // send approved templates in a shared account. Signed out → error
+      // → empty list.
+      const { data, error } = await listApprovedTemplates();
 
       if (cancelled) return;
       if (error) {
-        console.error("Failed to fetch templates:", error);
+        if (error.status !== 401) console.error("Failed to fetch templates:", error.message);
         setTemplates([]);
       } else {
-        setTemplates((data as MessageTemplate[]) ?? []);
+        setTemplates(data.templates);
       }
       setLoading(false);
     })();

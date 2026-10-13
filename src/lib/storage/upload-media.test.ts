@@ -1,5 +1,33 @@
-import { describe, expect, it } from "vitest";
-import { buildMediaPath, MEDIA_MAX_BYTES_BY_KIND } from "./upload-media";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  buildMediaPath,
+  deleteAccountMedia,
+  MEDIA_MAX_BYTES_BY_KIND,
+  uploadAccountMedia,
+} from "./upload-media";
+
+const h = vi.hoisted(() => ({
+  me: null as unknown,
+  uploads: [] as { bucket: string; path: string }[],
+  removed: [] as { bucket: string; paths: string[] }[],
+}));
+
+vi.mock("@/lib/http/client", () => ({ apiRequest: async () => h.me }));
+vi.mock("@/lib/storage/client", () => ({
+  getBrowserStorage: () => ({
+    from: (bucket: string) => ({
+      upload: async (path: string) => {
+        h.uploads.push({ bucket, path });
+        return { data: { path, fullPath: `${bucket}/${path}` }, error: null };
+      },
+      getPublicUrl: (path: string) => ({ data: { publicUrl: `https://cdn.test/${bucket}/${path}` } }),
+      remove: async (paths: string[]) => {
+        h.removed.push({ bucket, paths });
+        return { data: [], error: null };
+      },
+    }),
+  }),
+}));
 
 const ACCOUNT = "11111111-2222-3333-4444-555555555555";
 
@@ -53,5 +81,42 @@ describe("MEDIA_MAX_BYTES_BY_KIND", () => {
     expect(MEDIA_MAX_BYTES_BY_KIND.video).toBe(16 * 1024 * 1024);
     expect(MEDIA_MAX_BYTES_BY_KIND.audio).toBe(16 * 1024 * 1024);
     expect(MEDIA_MAX_BYTES_BY_KIND.document).toBe(16 * 1024 * 1024);
+  });
+});
+
+describe("uploadAccountMedia / deleteAccountMedia", () => {
+  beforeEach(() => {
+    h.me = { data: { profile: { account_id: "acct-from-me" } }, error: null };
+    h.uploads = [];
+    h.removed = [];
+  });
+
+  it("uploads under the caller's account folder (resolved via /api/me)", async () => {
+    const file = new File(["x"], "photo.png", { type: "image/png" });
+    const res = await uploadAccountMedia("chat-media", file);
+    expect(h.uploads[0].bucket).toBe("chat-media");
+    expect(res.path.startsWith("account-acct-from-me/")).toBe(true);
+    expect(res.publicUrl).toBe(`https://cdn.test/chat-media/${res.path}`);
+  });
+
+  it("uses an explicit account id without asking /api/me", async () => {
+    h.me = { data: null, error: { status: 500, message: "should not be called" } };
+    const res = await uploadAccountMedia("flow-media", new File(["x"], "a.pdf"), ACCOUNT);
+    expect(res.path.startsWith(`account-${ACCOUNT}/`)).toBe(true);
+  });
+
+  it("throws a user-facing error when signed out or unlinked", async () => {
+    h.me = { data: null, error: { status: 401, message: "Unauthorized" } };
+    await expect(uploadAccountMedia("chat-media", new File(["x"], "a.png"))).rejects.toThrow("Not signed in.");
+    h.me = { data: { profile: null }, error: null };
+    await expect(uploadAccountMedia("chat-media", new File(["x"], "a.png"))).rejects.toThrow(
+      "Could not resolve your account.",
+    );
+    expect(h.uploads).toEqual([]);
+  });
+
+  it("removes a staged object", async () => {
+    await deleteAccountMedia("chat-media", "account-x/1-a.png");
+    expect(h.removed).toEqual([{ bucket: "chat-media", paths: ["account-x/1-a.png"] }]);
   });
 });

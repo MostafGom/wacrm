@@ -7,8 +7,9 @@
 // has — resolves-or-creates the contact + conversation, then runs the
 // same shared send core.
 //
-// Auth: API key with the `messages:send` scope. Account context (and
-// the service-role client) come from `requireApiKey`.
+// Auth: API key with the `messages:send` scope. The account context
+// comes from `requireApiKey`; DB steps run as the service role
+// (`serviceRunner`), scoped by that account.
 //
 // Body:
 //   {
@@ -32,6 +33,7 @@
 // ============================================================
 
 import { requireApiKey } from '@/lib/auth/api-context';
+import { serviceRunner } from '@/server/db';
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 import { resolveConversationByPhone } from '@/lib/whatsapp/resolve-conversation';
 import {
@@ -99,14 +101,14 @@ export async function POST(request: Request) {
     // steps share `SendMessageError`, so one catch maps the whole
     // pipeline to the envelope.
     const resolved = await resolveConversationByPhone(
-      ctx.supabase,
+      serviceRunner,
       ctx.accountId,
       to,
       typeof body.name === 'string' ? body.name : null
     );
 
     const result = await sendMessageToConversation(
-      ctx.supabase,
+      serviceRunner,
       ctx.accountId,
       {
         conversationId: resolved.conversationId,

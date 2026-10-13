@@ -1,12 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { createClient } from "@/lib/supabase/client";
-import {
-  CONVERSATION_SELECT,
-  matchesContactFilters,
-  normalizeConversations,
-} from "@/lib/inbox/conversations";
+import { matchesContactFilters } from "@/lib/inbox/conversations";
+import { listConversations } from "@/lib/inbox/inbox-api";
+import { listTags } from "@/lib/contacts/contacts-api";
 import { cn } from "@/lib/utils";
 import type { Conversation, ConversationStatus, Tag } from "@/types";
 import { Search, ChevronDown, X } from "lucide-react";
@@ -91,30 +88,24 @@ export function ConversationList({
   });
 
   useEffect(() => {
-    const supabase = createClient();
     let cancelled = false;
 
     (async () => {
-      const { data, error } = await supabase
-        .from("conversations")
-        .select(CONVERSATION_SELECT)
-        .order("last_message_at", { ascending: false });
+      const { data, error } = await listConversations();
 
       if (cancelled) return;
 
       if (error) {
-        // Supabase errors have non-enumerable properties — log fields explicitly
         console.error("Failed to fetch conversations:", {
           message: error.message,
-          details: error.details,
-          hint: error.hint,
+          status: error.status,
           code: error.code,
         });
         setLoading(false);
         return;
       }
 
-      onConversationsLoadedRef.current(normalizeConversations(data ?? []));
+      onConversationsLoadedRef.current(data.conversations);
       setLoading(false);
     })();
 
@@ -129,11 +120,10 @@ export function ConversationList({
   // Tag definitions for the filter picker — loaded once so labels/colours
   // stay stable regardless of which conversations happen to be loaded.
   useEffect(() => {
-    const supabase = createClient();
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from("tags").select("*").order("name");
-      if (!cancelled && data) setTags(data as Tag[]);
+      const { data } = await listTags();
+      if (!cancelled && data) setTags(data.tags);
     })();
     return () => {
       cancelled = true;

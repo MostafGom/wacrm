@@ -3,11 +3,7 @@
 import { Suspense, useState, useCallback, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { createClient } from "@/lib/supabase/client";
-import {
-  CONVERSATION_SELECT,
-  normalizeConversation,
-} from "@/lib/inbox/conversations";
+import { getConversation, getInboxStatus } from "@/lib/inbox/inbox-api";
 import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
 import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
@@ -110,7 +106,7 @@ function InboxPageInner() {
    * `let foundInList = false; setState(p => { foundInList = ...; return ... })`
    * flag reads as `false` in the same tick (this exact bug shipped in #105
    * and caused #106: every incoming message and every status flip fired a
-   * redundant DB hydrate, swamping the supabase client and starving the
+   * redundant DB hydrate, swamping the API and starving the
    * realtime channel). The ref is kept in sync via the effect below.
    */
   const knownConvIdsRef = useRef<Set<string>>(new Set());
@@ -121,7 +117,7 @@ function InboxPageInner() {
   }, [conversations]);
 
   // Pull the conversation row with its `contact` joined and merge it
-  // into state. Needed because Supabase Realtime payloads only carry the
+  // into state. Needed because realtime payloads only carry the
   // row's own columns — a brand-new conversation arrives without a
   // contact, which surfaced as "Unknown" names, empty avatars, and
   // (when the conv-INSERT event was delayed past the message-INSERT)
@@ -132,25 +128,18 @@ function InboxPageInner() {
     if (hydratingConvIdsRef.current.has(convId)) return;
     hydratingConvIdsRef.current.add(convId);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("conversations")
-        .select(CONVERSATION_SELECT)
-        .eq("id", convId)
-        .maybeSingle();
+      const { data, error } = await getConversation(convId);
       if (error) {
-        // Supabase errors have non-enumerable properties — log fields
-        // explicitly so the console message isn't just `{}`.
+        // Gone / not visible: nothing to hydrate.
+        if (error.status === 404) return;
         console.error("Failed to hydrate conversation:", {
           message: error.message,
-          details: error.details,
-          hint: error.hint,
+          status: error.status,
           code: error.code,
         });
         return;
       }
-      if (!data) return;
-      const fetched = normalizeConversation(data);
+      const fetched = data.conversation;
       setConversations((prev) => {
         const existing = prev.find((c) => c.id === fetched.id);
         if (existing) {
@@ -175,38 +164,18 @@ function InboxPageInner() {
   // Check WhatsApp connection status on mount
   useEffect(() => {
     const checkConnection = async () => {
-      const supabase = createClient();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const user = session?.user;
-
-      if (!user) return;
-
-      // whatsapp_config is one-row-per-account post-multi-user, so
-      // the previous `.eq('user_id', user.id)` would miss the row
-      // for any teammate who didn't personally save the config —
-      // the "WhatsApp not connected" banner would show in the
-      // shared inbox even though the admin had it configured.
-      // Resolve account_id via the profile and query by that.
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("account_id")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      const accountId = profile?.account_id as string | undefined;
-      if (!accountId) {
-        setWhatsappConnected(false);
+      // whatsapp_config is one-row-per-account post-multi-user, so the
+      // status is resolved by the caller's account server-side — a
+      // teammate who didn't personally save the config still sees the
+      // shared connection.
+      const { data, error } = await getInboxStatus();
+      if (error) {
+        // Signed out: leave the banner hidden. A profile with no
+        // account reads as "not connected", as before.
+        if (error.status === 403) setWhatsappConnected(false);
         return;
       }
-
-      const { data } = await supabase
-        .from("whatsapp_config")
-        .select("status")
-        .eq("account_id", accountId)
-        .maybeSingle();
-
-      setWhatsappConnected(data?.status === "connected");
+      setWhatsappConnected(data.whatsapp_connected);
     };
 
     checkConnection();

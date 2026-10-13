@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { addNote, getContactDetail, listTags } from "@/lib/contacts/contacts-api";
 import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
 import type { Contact, Deal, ContactNote, Tag } from "@/types";
@@ -34,48 +34,36 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
   const [copied, setCopied] = useState(false);
   const [deals, setDeals] = useState<Deal[]>([]);
   const [notes, setNotes] = useState<ContactNote[]>([]);
-  const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
 
   const fetchContactData = useCallback(async () => {
     if (!contact) return;
 
-    const supabase = createClient();
-
-    // Fetch deals, notes, and tags in parallel
-    const [dealsRes, notesRes, tagsRes] = await Promise.all([
-      supabase
-        .from("deals")
-        .select("*, stage:pipeline_stages(*)")
-        .eq("contact_id", contact.id)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("contact_notes")
-        .select("*")
-        .eq("contact_id", contact.id)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("contact_tags")
-        .select("id, tag_id, tags(*)")
-        .eq("contact_id", contact.id),
+    // Deals, notes and tag ids come with the contact detail; tag
+    // definitions (name / colour) from the account's tag list.
+    const [detailRes, tagsRes] = await Promise.all([
+      getContactDetail(contact.id),
+      listTags(),
     ]);
 
-    if (dealsRes.data) setDeals(dealsRes.data);
-    if (notesRes.data) setNotes(notesRes.data);
-    if (tagsRes.data) {
-      const mapped = tagsRes.data
-        .filter((ct: Record<string, unknown>) => ct.tags)
-        .map((ct: Record<string, unknown>) => ({
-          ...(ct.tags as Tag),
-          contact_tag_id: ct.id as string,
-        }));
-      setTags(mapped);
+    if (detailRes.data) {
+      setDeals(detailRes.data.deals);
+      setNotes(detailRes.data.notes);
+      if (tagsRes.data) {
+        const byId = new Map(tagsRes.data.tags.map((tag) => [tag.id, tag]));
+        setTags(
+          detailRes.data.tag_ids
+            .map((id) => byId.get(id))
+            .filter((tag): tag is Tag => tag != null),
+        );
+      }
     }
   }, [contact]);
 
-  // Load on contact change. setContactData/setTags run inside async
-  // Supabase callbacks, not synchronously in the effect body.
+  // Load on contact change. setDeals/setNotes/setTags run inside async
+  // fetch callbacks, not synchronously in the effect body.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchContactData();
@@ -99,25 +87,10 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
     if (!accountId) return;
     setAddingNote(true);
 
-    const supabase = createClient();
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    const user = session?.user;
-
-    const { data, error } = await supabase
-      .from("contact_notes")
-      .insert({
-        contact_id: contact.id,
-        account_id: accountId,
-        user_id: user?.id,
-        note_text: newNote.trim(),
-      })
-      .select()
-      .single();
+    const { data, error } = await addNote(contact.id, newNote.trim());
 
     if (!error && data) {
-      setNotes((prev) => [data, ...prev]);
+      setNotes((prev) => [data.note, ...prev]);
       setNewNote("");
     }
     setAddingNote(false);
@@ -199,7 +172,7 @@ export function ContactSidebar({ contact }: ContactSidebarProps) {
               ) : (
                 tags.map((tag) => (
                   <span
-                    key={tag.contact_tag_id}
+                    key={tag.id}
                     className="rounded-full px-2 py-0.5 text-[10px] font-medium"
                     style={{
                       backgroundColor: `${tag.color}20`,

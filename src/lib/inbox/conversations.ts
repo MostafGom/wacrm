@@ -1,15 +1,12 @@
 import type { Conversation, Contact, Tag } from "@/types";
 
 /**
- * Conversation select that embeds the contact plus its tags, so the Inbox
- * can filter conversations by contact tag without a second round-trip.
- * `contact_tags(tags(*))` returns the join rows; {@link normalizeConversation}
- * flattens them onto `contact.tags`.
+ * Raw conversation row as the repositories return it
+ * (`listConversationsWithContact` / `getConversationWithContact` in
+ * src/server/repos/conversations.ts): the contact embedded with its
+ * `contact_tags: [{ tags }]` join rows (the shape the inbox and the
+ * public API have always consumed).
  */
-export const CONVERSATION_SELECT =
-  "*, contact:contacts(*, contact_tags(tags(*)))";
-
-/** Raw shape returned by {@link CONVERSATION_SELECT} before flattening. */
 type RawContact = Contact & { contact_tags?: { tags: Tag | null }[] };
 type RawConversation = Omit<Conversation, "contact"> & {
   contact?: RawContact | null;
@@ -17,8 +14,8 @@ type RawConversation = Omit<Conversation, "contact"> & {
 
 /**
  * Flatten the embedded `contact_tags(tags(*))` join into `contact.tags`.
- * Safe to call on rows fetched with {@link CONVERSATION_SELECT}; a row with
- * no contact (e.g. a freshly-inserted conversation) passes through untouched.
+ * Safe to call on rows with that embed; a row with no contact (e.g. a
+ * realtime payload) passes through untouched.
  */
 export function normalizeConversation(raw: RawConversation): Conversation {
   const rawContact = raw.contact;

@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+import { getServerSession } from '@/lib/auth/server-session'
+import { asUser } from '@/server/db'
+import { getWhatsAppSendConfig } from '@/server/repos/messages'
+import { getProfileByUserId } from '@/server/repos/profiles'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { getT } from '@/lib/i18n/translate'
@@ -20,30 +23,25 @@ export async function GET(
       )
     }
 
-    const supabase = await createClient()
-
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-
-    if (authError || !user) {
+    const session = await getServerSession()
+    if (!session) {
       return NextResponse.json(
         { error: t('common.unauthorized') },
         { status: 401 }
       )
     }
+    const userId = session.user.id
 
     // Resolve the caller's account_id — whatsapp_config is one-per-
     // account post-multi-user, so a teammate fetching media for a
     // conversation in the shared inbox needs the account's config,
     // not their personal (non-existent) row.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('account_id')
-      .eq('user_id', user.id)
-      .maybeSingle()
-    const accountId = profile?.account_id as string | undefined
+    const { accountId, config } = await asUser(userId, async (db) => {
+      const profile = await getProfileByUserId(db, userId)
+      const accountId = profile?.account_id ?? undefined
+      if (!accountId) return { accountId: undefined, config: undefined }
+      return { accountId, config: await getWhatsAppSendConfig(db, accountId) }
+    })
     if (!accountId) {
       return NextResponse.json(
         { error: t('common.profileNotLinked') },
@@ -51,14 +49,7 @@ export async function GET(
       )
     }
 
-    // Fetch and decrypt WhatsApp config
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
-
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
         { error: t('common.whatsappNotConfigured') },
         { status: 400 }

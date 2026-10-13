@@ -3,7 +3,8 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { createClient } from "@/lib/supabase/client";
+import { getConversation } from "@/lib/inbox/inbox-api";
+import { createChannel } from "@/lib/realtime/client";
 import type { Message } from "@/types";
 import {
   DEFAULT_NOTIFICATION_LABELS,
@@ -37,7 +38,7 @@ export function useBrowserNotifyPref(): boolean {
  * per signed-in dashboard tab (the dashboard shell does this via
  * <BrowserNotificationsListener />) so alerts fire on any page.
  *
- * Listens for realtime INSERTs on `messages` — RLS scopes the stream to
+ * Listens for realtime INSERTs on `messages` — the server scopes the stream to
  * the caller's account, same as useTotalUnread / useRealtime. Only
  * live events are considered: there is no initial fetch, so an existing
  * backlog never produces a burst of alerts on page load.
@@ -77,22 +78,15 @@ export function useBrowserNotifications(): void {
     if (!enabled) return;
     if (getNotificationPermission() === "unsupported") return;
 
-    const supabase = createClient();
     let cancelled = false;
 
     const notify = async (msg: Message) => {
-      // One small select to put the contact's name in the title. A
+      // One small fetch to put the contact's name in the title. A
       // failure here just means the generic fallback title.
-      const { data } = await supabase
-        .from("conversations")
-        .select("contact:contacts(name, wa_username, phone)")
-        .eq("id", msg.conversation_id)
-        .maybeSingle();
+      const { data } = await getConversation(msg.conversation_id);
       if (cancelled) return;
 
-      const contact = (data as {
-        contact?: { name?: string | null; wa_username?: string | null; phone?: string | null } | null;
-      } | null)?.contact;
+      const contact = data?.conversation.contact;
       const { title, body } = buildNotificationContent(
         msg,
         pickContactDisplayName(contact),
@@ -119,8 +113,7 @@ export function useBrowserNotifications(): void {
       }
     };
 
-    const channel = supabase
-      .channel("browser-notifications")
+    const channel = createChannel("browser-notifications")
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
@@ -145,7 +138,7 @@ export function useBrowserNotifications(): void {
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      void channel.unsubscribe();
     };
   }, [enabled, router]);
 }
