@@ -20,7 +20,13 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { SupabaseClient } from '@/lib/db';
+import { asService } from '@/server/db';
+import {
+  listActiveEndpointsForEvent,
+  markEndpointDelivered,
+  recordWebhookFailure,
+  type DeliverableEndpoint,
+} from '@/server/repos/inbound-webhook-endpoints';
 
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { buildSignatureHeader } from '@/lib/webhooks/sign';
@@ -33,31 +39,25 @@ export const DELIVERY_TIMEOUT_MS = 5000;
 /** Auto-disable an endpoint after this many consecutive failures. */
 export const MAX_CONSECUTIVE_FAILURES = 15;
 
-interface EndpointRow {
-  id: string;
-  url: string;
-  secret: string;
-}
+type EndpointRow = DeliverableEndpoint;
 
 /**
  * Deliver `event` (+ `data`) to every active endpoint of `accountId`
  * subscribed to it. Never throws.
+ *
+ * Database work runs in short service-role transactions of its own; the
+ * HTTP POSTs happen between them, never inside one.
  */
 export async function dispatchWebhookEvent(
-  db: SupabaseClient,
   accountId: string,
   event: WebhookEvent,
   data: unknown
 ): Promise<void> {
   try {
-    const { data: rows, error } = await db
-      .from('webhook_endpoints')
-      .select('id, url, secret')
-      .eq('account_id', accountId)
-      .eq('is_active', true)
-      .contains('events', [event]);
-
-    if (error || !rows || rows.length === 0) return;
+    const rows = await asService((db) =>
+      listActiveEndpointsForEvent(db, accountId, event)
+    );
+    if (rows.length === 0) return;
 
     // Sign the exact bytes we send so a receiver can recompute the
     // HMAC over the raw request body. `id` is a per-delivery uuid the
@@ -73,9 +73,7 @@ export async function dispatchWebhookEvent(
     const tsSeconds = Math.floor(Date.now() / 1000);
 
     await Promise.allSettled(
-      (rows as EndpointRow[]).map((row) =>
-        deliverOne(db, row, event, payload, tsSeconds)
-      )
+      rows.map((row) => deliverOne(accountId, row, event, payload, tsSeconds))
     );
   } catch (err) {
     // Never let a delivery problem bubble into the webhook response.
@@ -84,7 +82,7 @@ export async function dispatchWebhookEvent(
 }
 
 async function deliverOne(
-  db: SupabaseClient,
+  accountId: string,
   row: EndpointRow,
   event: WebhookEvent,
   payload: string,
@@ -95,7 +93,7 @@ async function deliverOne(
   // misconfigured internal URL surfaces and eventually auto-disables.
   if (!(await isDeliverableUrl(row.url))) {
     console.warn('[webhooks] refusing non-public delivery target for', row.id);
-    await recordFailure(db, row);
+    await recordFailure(row);
     return;
   }
 
@@ -106,7 +104,7 @@ async function deliverOne(
     // A row whose secret can't be decrypted can never produce a valid
     // signature — count it as a failure so it eventually auto-disables.
     console.error('[webhooks] secret decrypt failed for', row.id, err);
-    await recordFailure(db, row);
+    await recordFailure(row);
     return;
   }
 
@@ -127,32 +125,35 @@ async function deliverOne(
       signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`endpoint responded ${res.status}`);
-
-    // Success: clear the failure streak.
-    await db
-      .from('webhook_endpoints')
-      .update({ failure_count: 0, last_delivery_at: new Date().toISOString() })
-      .eq('id', row.id);
   } catch (err) {
     console.warn(
       `[webhooks] delivery to ${row.id} failed:`,
       err instanceof Error ? err.message : err
     );
-    await recordFailure(db, row);
+    await recordFailure(row);
+    return;
+  }
+
+  // Success: clear the failure streak. Outside the try above so a
+  // bookkeeping error is not miscounted as a delivery failure.
+  try {
+    await asService((db) => markEndpointDelivered(db, accountId, row.id));
+  } catch (err) {
+    console.error('[webhooks] could not reset failure_count for', row.id, err);
   }
 }
 
-async function recordFailure(db: SupabaseClient, row: EndpointRow): Promise<void> {
+async function recordFailure(row: EndpointRow): Promise<void> {
   // Atomic increment (+ auto-disable at the threshold) via a SQL
   // function — a read-modify-write here would lose increments when two
   // deliveries to the same endpoint run concurrently (e.g.
   // conversation.created + message.received for one inbound message),
   // so a dead endpoint might never reach the disable threshold.
-  const { error } = await db.rpc('record_webhook_failure', {
-    endpoint_id: row.id,
-    max_failures: MAX_CONSECUTIVE_FAILURES,
-  });
-  if (error) {
+  try {
+    await asService((db) =>
+      recordWebhookFailure(db, row.id, MAX_CONSECUTIVE_FAILURES)
+    );
+  } catch (error) {
     console.error('[webhooks] record_webhook_failure failed for', row.id, error);
   }
 }

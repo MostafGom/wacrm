@@ -11,9 +11,9 @@ const ACCOUNT = "11111111-2222-3333-4444-555555555555";
 const MEDIA_ID = "1234567890123456";
 
 /**
- * Minimal stand-in for `supabase.storage`. Records every upload so a
- * test can assert on the object path and the content type without a
- * Supabase project.
+ * Minimal stand-in for the service-role Storage API (`adminStorage()`).
+ * Records every upload so a test can assert on the object path and the
+ * content type without a database or storage driver.
  */
 function fakeStorage(uploadError: { message: string } | null = null) {
   const uploads: Array<{
