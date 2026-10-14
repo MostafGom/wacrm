@@ -1,4 +1,4 @@
-# wacrm — CRM Template for WhatsApp
+# wacrm-without-supabase — CRM Template for WhatsApp on plain PostgreSQL
 
 > Self-hostable CRM template for WhatsApp® — shared inbox, contacts,
 > sales pipelines, broadcasts, and no-code automations. Fork it, brand
@@ -11,21 +11,23 @@
 </p>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-violet.svg)](./LICENSE)
-[![CI](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml/badge.svg)](https://github.com/ArnasDon/wacrm/actions/workflows/ci.yml)
+[![CI](https://github.com/MostafGom/wacrm-without-supabase/actions/workflows/ci.yml/badge.svg)](https://github.com/MostafGom/wacrm-without-supabase/actions/workflows/ci.yml)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org)
 [![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17%20%2B%20pgvector-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org)
-[![Stars](https://img.shields.io/github/stars/ArnasDon/wacrm?style=social)](https://github.com/ArnasDon/wacrm/stargazers)
+[![Stars](https://img.shields.io/github/stars/MostafGom/wacrm-without-supabase?style=social)](https://github.com/MostafGom/wacrm-without-supabase/stargazers)
 
-> **This fork runs on plain PostgreSQL — no Supabase.** Auth, row-level
+> **wacrm-without-supabase** is a fork of
+> [ArnasDon/wacrm](https://github.com/ArnasDon/wacrm) that runs on plain
+> PostgreSQL — no Supabase. Auth, row-level
 > security, file storage and realtime are built into the app, so the
 > whole stack is `docker compose up`: one Postgres container and the
 > app. See [Architecture](#architecture-standalone-postgres) below and
 > [docs/self-hosting.md](./docs/self-hosting.md).
 
-The upstream marketing site and docs live in a separate repo:
+The upstream project's marketing site and docs live in a separate repo:
 [ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)
-([wacrm.tech](https://wacrm.tech)). This repo is the product —
-clone or fork it to run your own CRM.
+([wacrm.tech](https://wacrm.tech)); they describe the original
+Supabase-based setup. For this fork, follow the docs in this repo.
 
 ## What you get out of the box
 
@@ -87,8 +89,8 @@ in an afternoon and make yours.
 ### Docker (everything included)
 
 ```bash
-git clone https://github.com/<your-username>/wacrm.git
-cd wacrm
+git clone https://github.com/MostafGom/wacrm-without-supabase.git
+cd wacrm-without-supabase
 cp .env.local.example .env.local   # set passwords, ENCRYPTION_KEY, Meta creds, PUBLIC_URL
 docker compose --env-file .env.local up --build -d
 ```
