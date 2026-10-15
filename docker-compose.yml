@@ -35,7 +35,10 @@ services:
     #   - '${DB_PORT:-5432}:5432'
     restart: unless-stopped
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres -d wacrm']
+      # Over TCP (-h 127.0.0.1): on a fresh volume the image's init phase
+      # runs a temporary server on the Unix socket only, which a socket
+      # check reports as ready, and `migrate` then can't connect.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U postgres -d wacrm']
       interval: 5s
       timeout: 5s
       retries: 20
