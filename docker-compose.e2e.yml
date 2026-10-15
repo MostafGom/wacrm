@@ -34,7 +34,8 @@ services:
       OPENAI_BASE_URL: http://fakes:4010/openai/v1
       ANTHROPIC_BASE_URL: http://fakes:4010/anthropic/v1
       AI_PROVIDER_ALLOWED_PRIVATE_HOSTS: fakes
-      WEBHOOK_ALLOWED_PRIVATE_HOSTS: fakes
+      # localhost: template header samples uploaded to the app itself.
+      WEBHOOK_ALLOWED_PRIVATE_HOSTS: fakes,localhost
     depends_on:
       fakes:
         condition: service_started

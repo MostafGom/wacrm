@@ -1,0 +1,60 @@
+name: E2E
+
+# The full browser suite against the docker stack with fake Meta / AI /
+# SMTP services (docker-compose.e2e.yml). Slower than CI, so it runs
+# nightly and on demand rather than on every push. See docs/testing.md.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Playwright (docker stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Start the stack
+        run: npm run e2e:up
+
+      - name: Run the suite
+        run: npm run e2e
+        env:
+          CI: 'true'
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose -p wacrm-e2e --env-file e2e/.env.e2e -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color app fakes > e2e-stack.log
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+            e2e-stack.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Stop the stack
+        if: always()
+        run: npm run e2e:down

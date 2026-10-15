@@ -46,6 +46,8 @@ const cfg = {
 // State
 // ------------------------------------------------------------
 
+let templateSeq = 0; // never reused, even after deletes
+
 /** Templates Meta "already has" (synced by the app). */
 function fixtureTemplates() {
   return [
@@ -296,12 +298,13 @@ async function handleGraph(req, res, parts, url) {
   }
   // Templates on the WABA
   if (b === "message_templates") {
-    if (method === "GET") return send(res, 200, { data: state.templates });
+    // Fixtures (no wabaId) belong to every WABA; submitted ones to their own.
+    if (method === "GET") return send(res, 200, { data: state.templates.filter((t) => !t.wabaId || t.wabaId === a) });
     if (method === "POST") {
       const body = json(await readBody(req));
       const tpl = {
         wabaId: a,
-        id: String(700000000000100 + state.templates.length),
+        id: String(700000000000100 + ++templateSeq),
         name: body.name,
         language: body.language,
         status: "PENDING",
@@ -348,7 +351,10 @@ async function handleGraph(req, res, parts, url) {
     if (body.status === "read") return send(res, 200, { success: true });
     const to = digits(body.to ?? body.recipient);
     if (!to) return metaError(res, 400, "(#100) The parameter to is required.", 100);
-    if (state.settings.rejectSendTo.has(to)) {
+    // The app retries 131030 with trunk-prefix variants of the number
+    // (phoneVariants), so reject those too: compare with zeros stripped.
+    const noZeros = (n) => n.replace(/0/g, "");
+    if ([...state.settings.rejectSendTo].some((r) => noZeros(r) === noZeros(to))) {
       return metaError(res, 400, "(#131030) Recipient phone number not in allowed list", 131030);
     }
     const id = `wamid.FAKE${nextId("")}`;

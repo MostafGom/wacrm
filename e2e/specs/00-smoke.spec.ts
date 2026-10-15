@@ -25,7 +25,8 @@ test("customer message appears live and the reply reaches the phone", async ({ b
 
   // Realtime: no reload needed.
   await page.getByText("Smoke Customer").first().click();
-  await expect(page.getByText("Hello there!")).toBeVisible();
+  // .last(): the list preview shows the text too; the bubble comes after it.
+  await expect(page.getByText("Hello there!").last()).toBeVisible();
 
   const box = page.getByPlaceholder(/type a message/i);
   await box.fill("Hi! How can we help?");

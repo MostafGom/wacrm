@@ -101,7 +101,7 @@ export const fakes = {
     return call("/__sim/status", { message_id: messageId, status });
   },
 
-  templateStatus(input: { template_id: string; name: string; language: string; event: string; waba_id: string }) {
+  templateStatus(input: { template_id: string; name: string; language: string; event: string; waba_id: string; reason?: string }) {
     return call("/__sim/template-status", input);
   },
 
