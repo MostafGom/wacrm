@@ -5,6 +5,7 @@
 //            The wizard's terminal status once its send loop finishes.
 //            Counts stay owned by the recipient aggregate trigger.
 //   DELETE → { ok: true }                                   (agent+)
+//            409 while the broadcast is still sending.
 //            Recipients cascade on broadcasts.id (migration 001).
 
 import { NextResponse } from 'next/server'
@@ -21,6 +22,7 @@ import {
 } from '@/server/repos/broadcasts'
 
 const t = getT('Api.common')
+const tb = getT('Api.broadcast')
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -64,7 +66,16 @@ export async function DELETE(_request: Request, { params }: Params) {
     const ctx = await requireRole('agent')
     const { id } = await params
     if (!isUuid(id)) throw new HttpError(404, t('notFound'))
-    await asUser(ctx.userId, (db) => deleteBroadcast(db, ctx.accountId, id))
+    const outcome = await asUser(ctx.userId, async (db) => {
+      const broadcast = await getBroadcast(db, ctx.accountId, id)
+      if (!broadcast) return 'missing' as const
+      // Same rule as the detail page's disabled Delete button.
+      if (broadcast.status === 'sending') return 'sending' as const
+      await deleteBroadcast(db, ctx.accountId, id)
+      return 'deleted' as const
+    })
+    if (outcome === 'missing') throw new HttpError(404, t('notFound'))
+    if (outcome === 'sending') throw new HttpError(409, tb('deleteWhileSending'))
     return NextResponse.json({ ok: true })
   } catch (err) {
     return toErrorResponse(err)

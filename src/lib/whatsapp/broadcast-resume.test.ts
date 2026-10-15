@@ -170,6 +170,16 @@ describe('planBroadcastResume', () => {
     expect(repo.failRecipients).not.toHaveBeenCalled();
   });
 
+  it('carries the header media saved on the broadcast, so a resend keeps its image', async () => {
+    setup({
+      broadcast: { ...BROADCAST, header_media_url: 'https://cdn.example.com/promo.png' },
+      config: CONFIG,
+      recipients: [recipient('r1', '+15551234567')],
+    });
+    const { plan } = await planBroadcastResume(run, 'acct-1', 'bc-1', 'failed');
+    expect(plan.headerMediaUrl).toBe('https://cdn.example.com/promo.png');
+  });
+
   it('scopes to failed rows when retrying, and to both for "all"', async () => {
     setup({ broadcast: BROADCAST, config: CONFIG, recipients: [recipient('r1', '+15551234567')] });
     await planBroadcastResume(run, 'acct-1', 'bc-1', 'failed');

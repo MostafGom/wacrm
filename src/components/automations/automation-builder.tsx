@@ -62,6 +62,7 @@ import {
 } from "@/components/interactive/interactive-builder"
 import { interactivePayloadPreviewText } from "@/lib/whatsapp/interactive"
 import { getBuilderResources } from "@/lib/automations/automations-api"
+import { templateVariableKeys } from "@/lib/automations/validate"
 import {
   childPath,
   insertAt,
@@ -233,7 +234,8 @@ interface PipelineStageOption {
   position: number
 }
 
-const ResourcesContext = createContext<AutomationResources>({
+/** Exported for tests; the builder fills it via ResourcesProvider. */
+export const ResourcesContext = createContext<AutomationResources>({
   tags: [],
   members: [],
   templates: [],
@@ -536,17 +538,24 @@ function DealPipelineFields({
 }
 
 /** Template dropdown showing approved templates by name + language,
- *  storing both template_name and language. Falls back to manual name +
- *  language inputs when no approved templates are synced yet. */
+ *  storing both template_name and language, plus one input per body
+ *  placeholder ({{1}}…{{n}}) stored as step_config.variables — the
+ *  engine sends them as the body parameters, in numeric order. Falls
+ *  back to manual name + language inputs when no approved templates are
+ *  synced yet. */
+type TemplatePatch = { template_name: string; language: string; variables?: Record<string, string> }
+
 function SendTemplateFields({
   templateName,
   language,
+  variables,
   onChange,
   t,
 }: {
   templateName: string
   language: string
-  onChange: (patch: { template_name: string; language: string }) => void
+  variables: Record<string, string>
+  onChange: (patch: TemplatePatch) => void
   t: ReturnType<typeof useTranslations>
 }) {
   const { templates } = useResources()
@@ -580,36 +589,65 @@ function SendTemplateFields({
   // share a name across languages stay distinct.
   const toValue = (name: string, lang: string) => `${name}::${lang}`
   const current = templateName ? toValue(templateName, language) : ""
-  const hasMatch = templates.some(
-    (t) => toValue(t.name, t.language ?? "en_US") === current,
-  )
+  const findTemplate = (value: string) =>
+    templates.find((tmpl) => toValue(tmpl.name, tmpl.language ?? "en_US") === value)
+  const selected = current ? findTemplate(current) : undefined
+  const keys = selected ? templateVariableKeys(selected.body_text ?? "") : []
 
   return (
-    <FieldBlock label={t("templates.templateLabel")}>
-      <select
-        value={current}
-        onChange={(e) => {
-          const [name, lang] = e.target.value.split("::")
-          onChange({ template_name: name ?? "", language: lang ?? "" })
-        }}
-        className={SELECT_CLASS}
-      >
-        <option value="">{t("templates.select")}</option>
-        {templates.map((tmpl) => {
-          const lang = tmpl.language ?? "en_US"
-          return (
-            <option key={tmpl.id} value={toValue(tmpl.name, lang)}>
-              {tmpl.name} ({lang})
+    <>
+      <FieldBlock label={t("templates.templateLabel")}>
+        <select
+          value={current}
+          onChange={(e) => {
+            const [name, lang] = e.target.value.split("::")
+            // Keep only the new template's placeholders: the engine sends
+            // every stored variable, so a stale extra one would make Meta
+            // reject the send for a parameter-count mismatch.
+            const next = findTemplate(e.target.value)
+            const kept: Record<string, string> = {}
+            for (const k of next ? templateVariableKeys(next.body_text ?? "") : []) {
+              kept[k] = variables[k] ?? ""
+            }
+            onChange({ template_name: name ?? "", language: lang ?? "", variables: kept })
+          }}
+          className={SELECT_CLASS}
+        >
+          <option value="">{t("templates.select")}</option>
+          {templates.map((tmpl) => {
+            const lang = tmpl.language ?? "en_US"
+            return (
+              <option key={tmpl.id} value={toValue(tmpl.name, lang)}>
+                {tmpl.name} ({lang})
+              </option>
+            )
+          })}
+          {current && !selected && (
+            <option value={current}>
+              {t("templates.unknown", { name: templateName, lang: language || t("templates.unknownLang") })}
             </option>
-          )
-        })}
-        {current && !hasMatch && (
-          <option value={current}>
-            {t("templates.unknown", { name: templateName, lang: language || t("templates.unknownLang") })}
-          </option>
-        )}
-      </select>
-    </FieldBlock>
+          )}
+        </select>
+      </FieldBlock>
+      {keys.length > 0 && (
+        <p className="mb-2 text-xs text-muted-foreground">{t("templates.variablesHint")}</p>
+      )}
+      {keys.map((k) => (
+        <FieldBlock key={k} label={t("templates.variableLabel", { placeholder: `{{${k}}}` })}>
+          <Input
+            value={variables[k] ?? ""}
+            onChange={(e) =>
+              onChange({
+                template_name: templateName,
+                language,
+                variables: { ...variables, [k]: e.target.value },
+              })
+            }
+            className="bg-muted text-foreground"
+          />
+        </FieldBlock>
+      ))}
+    </>
   )
 }
 
@@ -1275,7 +1313,7 @@ function AddButton({ onPick }: { onPick: (t: AutomationStepType) => void }) {
 // Per-step config editor
 // ------------------------------------------------------------
 
-function StepEditor({
+export function StepEditor({
   step,
   onChange,
 }: {
@@ -1341,6 +1379,7 @@ function StepEditor({
         <SendTemplateFields
           templateName={(cfg.template_name as string) ?? ""}
           language={(cfg.language as string) ?? ""}
+          variables={(cfg.variables as Record<string, string> | undefined) ?? {}}
           onChange={(patch) => set(patch)}
           t={t}
         />
@@ -1457,7 +1496,9 @@ function StepEditor({
           <FieldBlock label={t("config.subjectLabel")}>
             <select
               value={(cfg.subject as string) ?? "tag_presence"}
-              onChange={(e) => set({ subject: e.target.value })}
+              // The operand means something different per subject (tag id,
+              // field name, time window), so don't carry it across.
+              onChange={(e) => set({ subject: e.target.value, operand: "" })}
               className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-sm text-foreground"
             >
               <option value="tag_presence">{t("config.subjects.tag_presence")}</option>
@@ -1466,25 +1507,31 @@ function StepEditor({
               <option value="time_of_day">{t("config.subjects.time_of_day")}</option>
             </select>
           </FieldBlock>
-          <FieldBlock label={t("config.operandLabel")}>
-            <Input
-              placeholder={
-                cfg.subject === "time_of_day"
-                  ? t("config.placeholderTime")
-                  : cfg.subject === "contact_field"
-                  ? t("config.placeholderContact")
-                  : cfg.subject === "tag_presence"
-                  ? t("config.placeholderTag")
-                  : ""
-              }
-              value={(cfg.operand as string) ?? ""}
-              onChange={(e) => set({ operand: e.target.value })}
-              className="bg-muted text-foreground"
-            />
-          </FieldBlock>
+          {/* message_content only reads Value (the text to look for). */}
+          {cfg.subject !== "message_content" && (
+            <FieldBlock label={t("config.operandLabel")}>
+              <Input
+                placeholder={
+                  cfg.subject === "time_of_day"
+                    ? t("config.placeholderTime")
+                    : cfg.subject === "contact_field"
+                    ? t("config.placeholderContact")
+                    : cfg.subject === "tag_presence"
+                    ? t("config.placeholderTag")
+                    : ""
+                }
+                value={(cfg.operand as string) ?? ""}
+                onChange={(e) => set({ operand: e.target.value })}
+                className="bg-muted text-foreground"
+              />
+            </FieldBlock>
+          )}
           {(cfg.subject === "contact_field" || cfg.subject === "message_content") && (
             <FieldBlock label={t("config.valueLabel")}>
               <Input
+                placeholder={
+                  cfg.subject === "message_content" ? t("config.placeholderMessageContains") : undefined
+                }
                 value={(cfg.value as string) ?? ""}
                 onChange={(e) => set({ value: e.target.value })}
                 className="bg-muted text-foreground"

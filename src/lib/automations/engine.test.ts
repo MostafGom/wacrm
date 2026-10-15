@@ -19,6 +19,8 @@ const h = vi.hoisted(() => {
     logInserts: [] as Record<string, unknown>[],
     /** Each log patch, minus appended steps (status / error_message). */
     logUpdates: [] as Record<string, unknown>[],
+    /** Every step result appended to steps_executed, in write order. */
+    logSteps: [] as Record<string, unknown>[],
     // automation_pending_executions rows, mutated in place by updates.
     pending: [] as Record<string, unknown>[],
   };
@@ -68,8 +70,8 @@ const h = vi.hoisted(() => {
     }),
     updateAutomationLog: vi.fn(
       async (_db: unknown, _accountId: string, _logId: string, patch: Record<string, unknown>) => {
-        const { appendSteps: _appended, ...rest } = patch;
-        void _appended;
+        const { appendSteps, ...rest } = patch;
+        if (Array.isArray(appendSteps)) state.logSteps.push(...appendSteps);
         state.logUpdates.push(rest);
       },
     ),
@@ -137,7 +139,7 @@ const h = vi.hoisted(() => {
     ),
     assignContactConversations: vi.fn(async () => {}),
     closeContactConversations: vi.fn(async () => {}),
-    firstAccountMemberUserId: vi.fn(async () => null),
+    nextRoundRobinAssignee: vi.fn(async (): Promise<string | null> => null),
     getAccountDefaultCurrency: vi.fn(async () => "USD"),
     insertDeal: vi.fn(async () => {}),
   };
@@ -177,6 +179,7 @@ beforeEach(() => {
   h.state.upsertCalls = [];
   h.state.logInserts = [];
   h.state.logUpdates = [];
+  h.state.logSteps = [];
   h.state.pending = [];
   vi.clearAllMocks();
 });
@@ -890,5 +893,114 @@ describe("wait_for_reply", () => {
     expect(expired).toBe(1);
     expect(h.state.pending[0].status).toBe("expired");
     expect(h.state.logUpdates.at(-1)).toEqual({ error_message: "no reply within 24h" });
+  });
+});
+
+describe("assign_conversation — round robin", () => {
+  it("asks the repo for the next member of this step's rotation and assigns them", async () => {
+    h.state.owned = { id: "c1" };
+    h.state.automations = [automationWithUpdateStep()];
+    h.state.steps = [
+      {
+        id: "rr1",
+        automation_id: "a1",
+        step_type: "assign_conversation",
+        position: 0,
+        parent_step_id: null,
+        step_config: { mode: "round_robin" },
+      },
+    ];
+    h.data.nextRoundRobinAssignee.mockResolvedValueOnce("agent-b");
+
+    await runAutomationsForTrigger({ accountId: ACCOUNT, triggerType: "new_message_received", contactId: "c1" });
+
+    expect(h.data.nextRoundRobinAssignee).toHaveBeenCalledWith(expect.anything(), ACCOUNT, "rr1");
+    expect(h.data.assignContactConversations).toHaveBeenCalledWith(expect.anything(), ACCOUNT, "c1", "agent-b");
+  });
+});
+
+describe("condition branches — log status and order", () => {
+  function step(
+    id: string,
+    step_type: string,
+    position: number,
+    step_config: Record<string, unknown>,
+    parent?: { id: string; branch: "yes" | "no" },
+  ) {
+    return {
+      id,
+      automation_id: "a1",
+      step_type,
+      position,
+      parent_step_id: parent?.id ?? null,
+      branch: parent?.branch ?? null,
+      step_config,
+    };
+  }
+  const contains = (value: string) => ({ subject: "message_content", operand: "", value });
+
+  beforeEach(() => {
+    h.state.owned = { id: "c1" };
+    h.state.automations = [automationWithUpdateStep()];
+  });
+
+  async function trigger(text: string) {
+    await runAutomationsForTrigger({
+      accountId: ACCOUNT,
+      triggerType: "new_message_received",
+      contactId: "c1",
+      context: { message_text: text },
+    });
+  }
+
+  it("marks the run failed when a step inside the taken branch fails, and stops there", async () => {
+    h.state.steps = [
+      step("cond", "condition", 0, contains("nestedfail")),
+      // SSRF-blocked, so it throws "send_webhook: destination not allowed".
+      step("hook", "send_webhook", 0, { url: "http://127.0.0.1:9/x" }, { id: "cond", branch: "yes" }),
+      step("after", "update_contact_field", 1, { field: "company", value: "should not run" }),
+    ];
+
+    await trigger("nestedfail");
+
+    const withStatus = h.state.logUpdates.filter((u) => "status" in u);
+    expect(withStatus.at(-1)).toMatchObject({ status: "failed" });
+    expect(h.state.logUpdates).toContainEqual(
+      expect.objectContaining({ error_message: "send_webhook: destination not allowed" }),
+    );
+    // A later write must not clear the branch's error message.
+    expect(h.state.logUpdates.some((u) => "error_message" in u && u.error_message == null)).toBe(false);
+    // Same as a top-level failure: nothing after the failing step runs.
+    expect(h.state.contactUpdates).toHaveLength(0);
+  });
+
+  it("propagates a failure out of a nested condition", async () => {
+    h.state.steps = [
+      step("outer", "condition", 0, contains("deep")),
+      step("inner", "condition", 0, contains("deep"), { id: "outer", branch: "yes" }),
+      step("hook", "send_webhook", 0, { url: "http://127.0.0.1:9/x" }, { id: "inner", branch: "yes" }),
+    ];
+
+    await trigger("deep");
+
+    const withStatus = h.state.logUpdates.filter((u) => "status" in u);
+    expect(withStatus.at(-1)).toMatchObject({ status: "failed" });
+  });
+
+  it("logs the condition before its branch's steps, in execution order", async () => {
+    h.state.steps = [
+      step("first", "update_contact_field", 0, { field: "company", value: "a" }),
+      step("cond", "condition", 1, contains("go")),
+      step("yes1", "update_contact_field", 0, { field: "name", value: "b" }, { id: "cond", branch: "yes" }),
+      step("yes2", "update_contact_field", 1, { field: "email", value: "c" }, { id: "cond", branch: "yes" }),
+      step("after", "update_contact_field", 2, { field: "company", value: "d" }),
+    ];
+
+    await trigger("go");
+
+    expect(h.state.logSteps.map((s) => s.step_id)).toEqual(["first", "cond", "yes1", "yes2", "after"]);
+    expect(h.state.logSteps[1]).toMatchObject({ step_type: "condition", detail: "branch=yes" });
+    const withStatus = h.state.logUpdates.filter((u) => "status" in u);
+    expect(withStatus.at(-1)).toMatchObject({ status: "success" });
   });
 });

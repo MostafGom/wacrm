@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -84,6 +84,19 @@ export function PipelineSettings({
   const [saving, setSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Adding / removing a stage is persisted immediately (not on Save),
+  // so remember that the server's stage list moved and refresh the
+  // board when the dialog closes by any path (Cancel, X, Esc, overlay,
+  // "create new pipeline"). Refreshing right away instead would
+  // re-sync `stages` into `localStages` and drop unsaved renames,
+  // recolours and reordering still pending in the dialog.
+  const stagesChangedOnServer = useRef(false);
+
+  useEffect(() => {
+    if (open || !stagesChangedOnServer.current) return;
+    stagesChangedOnServer.current = false;
+    onStagesChanged();
+  }, [open, onStagesChanged]);
 
   // Reset form state when the dialog opens or its prop inputs change
   // — legitimate prop-driven sync.
@@ -134,6 +147,7 @@ export function PipelineSettings({
       return;
     }
 
+    stagesChangedOnServer.current = false;
     onOpenChange(false);
     onPipelinesChanged();
     onStagesChanged();
@@ -152,6 +166,7 @@ export function PipelineSettings({
       toast.error(t("toastFailedAddStage"));
       return;
     }
+    stagesChangedOnServer.current = true;
     setLocalStages([...localStages, data.stage]);
     setNewStageName("");
     setNewStageColor(STAGE_COLORS[(localStages.length + 1) % STAGE_COLORS.length]);
@@ -169,6 +184,7 @@ export function PipelineSettings({
       toast.error(t("toastFailedDeleteStage"));
       return;
     }
+    stagesChangedOnServer.current = true;
     setLocalStages(localStages.filter((s) => s.id !== stageId));
   }
 
@@ -181,6 +197,9 @@ export function PipelineSettings({
       toast.error(t("toastFailedDeletePipeline"));
       return;
     }
+    // The pipeline (and its stages) are gone; onPipelinesChanged moves
+    // the selection, which reloads stages for the new pipeline.
+    stagesChangedOnServer.current = false;
     onOpenChange(false);
     onPipelinesChanged();
     toast.success(t("toastDeleted"));

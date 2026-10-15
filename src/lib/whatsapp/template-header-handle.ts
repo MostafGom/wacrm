@@ -1,7 +1,7 @@
 import { uploadResumableMedia } from '@/lib/whatsapp/meta-api'
 import { MEDIA_HEADER_SPECS, isMediaHeaderKind } from '@/lib/whatsapp/media-header-types'
 import type { TemplatePayload } from '@/lib/whatsapp/template-validators'
-import { isDeliverableUrl } from '@/lib/webhooks/ssrf'
+import { isDeliverableUrl, webhookAllowedPrivateHosts } from '@/lib/webhooks/ssrf'
 import { getT } from '@/lib/i18n/translate'
 
 /**
@@ -47,7 +47,11 @@ export async function ensureMediaHeaderHandle(
   // link-local / reserved address. Same guard as the two other
   // outbound-fetch call sites (see lib/webhooks/ssrf.ts) — matching the
   // unreachable-host message keeps the failure from being an oracle.
-  if (!(await isDeliverableUrl(payload.header_media_url))) {
+  if (
+    !(await isDeliverableUrl(payload.header_media_url, {
+      allowPrivateHosts: webhookAllowedPrivateHosts(),
+    }))
+  ) {
     throw new Error(unreachableMessage())
   }
 

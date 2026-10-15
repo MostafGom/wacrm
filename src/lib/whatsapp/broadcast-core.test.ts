@@ -224,6 +224,19 @@ describe('deliverBroadcast', () => {
     expect(repo.setBroadcastTerminalStatus).toHaveBeenCalledWith(fakeDb, 'acc', 'b-1', 'sent');
   });
 
+  it('sends the campaign header media with every recipient', async () => {
+    meta.sendTemplateMessage.mockResolvedValue({ messageId: 'wamid' });
+    repo.stampRecipient.mockResolvedValue(true);
+    repo.recipientStatusCounts.mockResolvedValue({ pending: 0, failed: 0, total: 2 });
+
+    await deliverBroadcast(run, plan({ headerMediaUrl: 'https://cdn.example.com/promo.png' }));
+
+    for (const [args] of meta.sendTemplateMessage.mock.calls) {
+      expect(args.messageParams).toMatchObject({ headerMediaUrl: 'https://cdn.example.com/promo.png' });
+    }
+    expect(meta.sendTemplateMessage.mock.calls[0][0].messageParams.body).toEqual(['A']);
+  });
+
   it('keeps going when one stamp fails', async () => {
     meta.sendTemplateMessage.mockResolvedValue({ messageId: 'wamid' });
     repo.stampRecipient.mockRejectedValueOnce(new Error('db blip')).mockResolvedValue(true);

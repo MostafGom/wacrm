@@ -10,6 +10,7 @@ import { serializeConversation } from '@/lib/api/v1/conversations';
 import { asService } from '@/server/db';
 import { getConversationWithContact } from '@/server/repos/conversations';
 import type { Conversation } from '@/types';
+import { isUuid } from '@/server/http';
 
 export async function GET(
   request: Request,
@@ -18,6 +19,7 @@ export async function GET(
   try {
     const ctx = await requireApiKey(request, 'conversations:read');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Conversation not found', 404);
 
     let data;
     try {

@@ -21,6 +21,7 @@ import {
   updateWebhookEndpoint,
   type WebhookEndpointUpdate,
 } from '@/server/repos/webhook-endpoints';
+import { isUuid } from '@/server/http';
 
 export async function GET(
   request: Request,
@@ -29,6 +30,7 @@ export async function GET(
   try {
     const ctx = await requireApiKey(request, 'webhooks:manage');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Webhook not found', 404);
 
     let data;
     try {
@@ -52,6 +54,7 @@ export async function PATCH(
   try {
     const ctx = await requireApiKey(request, 'webhooks:manage');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Webhook not found', 404);
 
     const body = (await request.json().catch(() => null)) as Record<
       string,
@@ -121,6 +124,7 @@ export async function DELETE(
   try {
     const ctx = await requireApiKey(request, 'webhooks:manage');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Webhook not found', 404);
 
     let deletedId: string | undefined;
     try {

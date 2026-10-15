@@ -12,6 +12,7 @@ import {
 } from '@/lib/contacts/contacts-api';
 import { addContactTag, deleteContactTag } from '@/lib/contacts/tag-api';
 import { useAuth } from '@/hooks/use-auth';
+import { useCan } from '@/hooks/use-can';
 import { formatCurrency } from '@/lib/currency';
 import { toast } from 'sonner';
 import type { Contact, Tag, ContactTag, ContactNote, CustomField, ContactCustomValue, Deal, MessageTemplate } from '@/types';
@@ -27,7 +28,7 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Button } from '@/components/ui/button';
+import { GatedButton } from '@/components/ui/gated-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -66,7 +67,13 @@ export function ContactDetailView({
   onUpdated,
 }: ContactDetailViewProps) {
   const t = useTranslations('Contacts.detailView');
+  const tGate = useTranslations('GatedButton');
   const { accountId, defaultCurrency } = useAuth();
+  // Contact, tag-on-contact, note and custom-value writes are agent+
+  // on the server (same bar as sending messages). Viewers get a
+  // read-only sheet instead of controls that 403 on click.
+  const canEdit = useCan('send-messages');
+  const editReason = tGate('reasons.editContacts');
 
   const [contact, setContact] = useState<Contact | null>(null);
   const [loading, setLoading] = useState(false);
@@ -376,8 +383,10 @@ export function ContactDetailView({
                 </div>
               </div>
               <div className="mt-3">
-                <Button
+                <GatedButton
                   size="sm"
+                  canAct={canEdit}
+                  gateReason={tGate('reasons.sendMessages')}
                   onClick={() => setTemplatePickerOpen(true)}
                   disabled={sendingTemplate}
                   className="bg-primary text-primary-foreground hover:bg-primary/90"
@@ -388,7 +397,7 @@ export function ContactDetailView({
                     <LayoutTemplate className="size-4" />
                   )}
                   {t('sendTemplateBtn')}
-                </Button>
+                </GatedButton>
               </div>
             </SheetHeader>
 
@@ -435,6 +444,7 @@ export function ContactDetailView({
                     <Input
                       value={editName}
                       onChange={(e) => setEditName(e.target.value)}
+                      readOnly={!canEdit}
                       className="bg-muted border-border text-foreground h-8 text-sm"
                     />
                   </div>
@@ -445,6 +455,7 @@ export function ContactDetailView({
                     <Input
                       value={editPhone}
                       onChange={(e) => setEditPhone(e.target.value)}
+                      readOnly={!canEdit}
                       className="bg-muted border-border text-foreground h-8 text-sm"
                     />
                   </div>
@@ -453,6 +464,7 @@ export function ContactDetailView({
                     <Input
                       value={editEmail}
                       onChange={(e) => setEditEmail(e.target.value)}
+                      readOnly={!canEdit}
                       className="bg-muted border-border text-foreground h-8 text-sm"
                     />
                   </div>
@@ -461,11 +473,14 @@ export function ContactDetailView({
                     <Input
                       value={editCompany}
                       onChange={(e) => setEditCompany(e.target.value)}
+                      readOnly={!canEdit}
                       className="bg-muted border-border text-foreground h-8 text-sm"
                     />
                   </div>
-                  <Button
+                  <GatedButton
                     onClick={saveDetails}
+                    canAct={canEdit}
+                    gateReason={editReason}
                     disabled={savingDetails}
                     className="bg-primary hover:bg-primary/90 text-primary-foreground w-full"
                     size="sm"
@@ -476,7 +491,7 @@ export function ContactDetailView({
                       <Save className="size-3.5" />
                     )}
                     {t('saveChangesBtn')}
-                  </Button>
+                  </GatedButton>
                 </div>
               </TabsContent>
 
@@ -498,11 +513,16 @@ export function ContactDetailView({
                           <button
                             key={tag.id}
                             onClick={() => toggleTag(tag.id)}
-                            disabled={savingTags}
-                            className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium transition-all cursor-pointer ${
+                            disabled={savingTags || !canEdit}
+                            title={canEdit ? undefined : tGate('readOnly', { action: editReason })}
+                            className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                              canEdit ? 'cursor-pointer' : 'cursor-not-allowed'
+                            } ${
                               selected
                                 ? 'ring-2 ring-primary ring-offset-1 ring-offset-border'
-                                : 'opacity-50 hover:opacity-80'
+                                : canEdit
+                                  ? 'opacity-50 hover:opacity-80'
+                                  : 'opacity-50'
                             }`}
                             style={{
                               backgroundColor: tag.color + '20',
@@ -525,11 +545,14 @@ export function ContactDetailView({
                   <Textarea
                     value={newNote}
                     onChange={(e) => setNewNote(e.target.value)}
+                    readOnly={!canEdit}
                     placeholder={t('notesTab.placeholder')}
                     className="bg-muted border-border text-foreground placeholder:text-muted-foreground min-h-[60px] text-sm resize-none"
                   />
-                  <Button
+                  <GatedButton
                     onClick={addNote}
+                    canAct={canEdit}
+                    gateReason={editReason}
                     disabled={!newNote.trim() || savingNote}
                     className="bg-primary hover:bg-primary/90 text-primary-foreground"
                     size="sm"
@@ -540,7 +563,7 @@ export function ContactDetailView({
                       <Plus className="size-3.5" />
                     )}
                     {t('notesTab.save')}
-                  </Button>
+                  </GatedButton>
                 </div>
 
                 <div className="flex-1 overflow-y-auto space-y-2">
@@ -562,12 +585,14 @@ export function ContactDetailView({
                           <p className="text-sm text-muted-foreground whitespace-pre-wrap flex-1">
                             {note.note_text}
                           </p>
-                          <button
-                            onClick={() => deleteNote(note.id)}
-                            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-400 transition-all cursor-pointer shrink-0"
-                          >
-                            <Trash2 className="size-3.5" />
-                          </button>
+                          {canEdit && (
+                            <button
+                              onClick={() => deleteNote(note.id)}
+                              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-400 transition-all cursor-pointer shrink-0"
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground mt-1.5">
                           {new Date(note.created_at).toLocaleDateString('en-US', {
@@ -609,13 +634,16 @@ export function ContactDetailView({
                               [field.id]: e.target.value,
                             }))
                           }
+                          readOnly={!canEdit}
                           placeholder={t('enterCustomField', { name: field.field_name })}
                           className="bg-muted border-border text-foreground h-8 text-sm placeholder:text-muted-foreground"
                         />
                       </div>
                     ))}
-                    <Button
+                    <GatedButton
                       onClick={saveCustomFields}
+                      canAct={canEdit}
+                      gateReason={editReason}
                       disabled={savingCustom}
                       className="bg-primary hover:bg-primary/90 text-primary-foreground w-full"
                       size="sm"
@@ -626,7 +654,7 @@ export function ContactDetailView({
                         <Save className="size-3.5" />
                       )}
                       {t('saveCustomFieldsBtn')}
-                    </Button>
+                    </GatedButton>
                   </div>
                 )}
               </TabsContent>

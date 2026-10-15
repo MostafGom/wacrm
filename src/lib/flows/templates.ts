@@ -87,7 +87,7 @@ const WELCOME_MENU: FlowTemplate = {
   description: t("welcome_menu.description"),
   icon: "MessageSquare",
   trigger_type: "keyword",
-  trigger_config: { keywords: keywords("welcome_menu.keywords"), match_type: "contains" },
+  trigger_config: { keywords: keywords("welcome_menu.keywords"), match_type: "word" },
   entry_node_id: "start",
   nodes: [
     {
@@ -143,7 +143,7 @@ const FAQ_BOT: FlowTemplate = {
   trigger_type: "keyword",
   trigger_config: {
     keywords: keywords("faq_bot.keywords"),
-    match_type: "contains",
+    match_type: "word",
   },
   entry_node_id: "start",
   nodes: [

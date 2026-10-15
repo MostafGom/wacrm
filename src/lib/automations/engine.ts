@@ -46,10 +46,10 @@ import {
   customFieldInAccount,
   deleteContactTag,
   findConversationIdForContact,
-  firstAccountMemberUserId,
   getAccountDefaultCurrency,
   getContactFieldValue,
   insertDeal,
+  nextRoundRobinAssignee,
   updateContactField,
   upsertContactCustomValue,
   type WritableContactField,
@@ -60,6 +60,7 @@ import { engineSendText, engineSendTemplate, engineSendInteractive } from './met
 import { validateInteractivePayload } from '@/lib/whatsapp/interactive'
 import { isDeliverableUrl, webhookAllowedPrivateHosts } from '@/lib/webhooks/ssrf'
 import { getT } from '@/lib/i18n/translate'
+import { matchesWholeWord } from '@/lib/keyword-match'
 
 /** Step errors land in automation_logs and are shown on the logs page. */
 const tErr = getT('LibErrors.engine')
@@ -492,6 +493,10 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<ScopeOutcome> {
           status: 'success',
           detail: `branch=${taken ? 'yes' : 'no'}`,
         })
+        // The branch appends its own results as it goes, so write this
+        // scope's results so far (ending with the condition) first —
+        // steps_executed then reads in execution order.
+        await appendResults(accountId, args.logId, results.splice(0), null, null)
         // Recurse into the chosen branch at position 0 (children use their
         // own ordering within the branch scope).
         const branchOutcome = await executeStepsFrom({
@@ -506,6 +511,14 @@ async function executeStepsFrom(args: ExecuteArgs): Promise<ScopeOutcome> {
         // (see runResumed).
         if (branchOutcome === 'suspended') {
           return suspend(args, results, errorMessage)
+        }
+        // A step in the branch failed: the run fails here, exactly as if
+        // that step had failed in this scope (the branch already logged
+        // the failed step and its error_message). Same rule runResumed
+        // applies when a resumed branch fails.
+        if (branchOutcome === 'failed') {
+          status = 'failed'
+          break
         }
         continue
       }
@@ -769,10 +782,10 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       const contactId = args.contactId
       let agentId: string | null | undefined = cfg.agent_id
       if (cfg.mode === 'round_robin') {
-        // Pick any member of the account. The existing implementation
-        // only ever returned the automation's author; preserving that
-        // shape until a real round-robin algorithm replaces it.
-        agentId = await asService((db) => firstAccountMemberUserId(db, accountId))
+        // Rotate over the members who take conversations (agent and up).
+        // The step keeps its own cursor; the repo locks it so concurrent
+        // runs of this step pick consecutive members.
+        agentId = await asService((db) => nextRoundRobinAssignee(db, accountId, step.id))
       }
       if (!agentId) return 'no agent resolved'
       const assignee = agentId
@@ -927,44 +940,8 @@ async function resolveConversationId(args: ExecuteArgs): Promise<string> {
   return id
 }
 
-/** Letter, digit or underscore in any script — the "inside a word" test. */
-const WORD_CHAR = '[\\p{L}\\p{N}_]'
-
-/**
- * Whole-word keyword test, behind `match_type: 'word'` (issue #409 — a
- * one-letter keyword under `contains` fires on every message containing
- * that letter, e.g. "k" on "thanks").
- *
- * Deliberately NOT `\b`, which is defined against `[A-Za-z0-9_]` and so
- * breaks two cases that matter for WhatsApp traffic:
- *
- *   - A keyword carrying punctuation: `/\bhi!\b/` demands a word character
- *     after the "!", so it never matches "say hi!".
- *   - Any non-Latin script: every character of "안녕" is a non-word
- *     character to `\b`, so `/\b안녕\b/` matches nothing at all.
- *
- * Unicode-aware lookarounds handle both. Note this really is word-based:
- * it won't find "안녕" inside "안녕하세요", because a language that doesn't
- * delimit words with spaces has no word edge there. That's what `contains`
- * is for, and it stays the default.
- *
- * Exported for direct unit testing of the escaping / boundary edges.
- */
-export function matchesWholeWord(
-  text: string,
-  keyword: string,
-  caseSensitive = false,
-): boolean {
-  if (!keyword) return false
-  // The keyword is account-supplied free text, so metacharacters have to
-  // be literal — otherwise "(" is an unterminated group and RegExp throws.
-  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const pattern = new RegExp(
-    `(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`,
-    caseSensitive ? 'u' : 'iu',
-  )
-  return pattern.test(text)
-}
+// Re-exported for the existing direct unit tests.
+export { matchesWholeWord }
 
 export function triggerMatches(automation: Automation, ctx: AutomationContext | undefined): boolean {
   if (automation.trigger_type === 'keyword_match') {

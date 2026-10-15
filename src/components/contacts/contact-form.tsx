@@ -65,7 +65,6 @@ export function ContactForm({
   const [dupMatch, setDupMatch] = useState<
     { contact: ExistingContact; exact: boolean } | null
   >(null);
-  const [checkingDup, setCheckingDup] = useState(false);
 
   const [tags, setTags] = useState<Tag[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
@@ -92,15 +91,14 @@ export function ContactForm({
       setDupMatch(null);
       return;
     }
-    setCheckingDup(true);
-    try {
-      const { data } = await findDuplicate(value);
-      setDupMatch(
-        data?.existing ? { contact: data.existing, exact: data.exact } : null,
-      );
-    } finally {
-      setCheckingDup(false);
-    }
+    // Not gating the submit button on this lookup: it starts on the
+    // phone field's blur, i.e. on mousedown of "Create", and disabling
+    // the button mid-click swallowed that click. A duplicate that slips
+    // past is still caught by the server (409 duplicate_phone below).
+    const { data } = await findDuplicate(value);
+    setDupMatch(
+      data?.existing ? { contact: data.existing, exact: data.exact } : null,
+    );
   }
 
   async function fetchTags() {
@@ -356,7 +354,7 @@ export function ContactForm({
             </Button>
             <Button
               type="submit"
-              disabled={saving || checkingDup || (!isEdit && !!dupMatch?.exact)}
+              disabled={saving || (!isEdit && !!dupMatch?.exact)}
               className="bg-primary hover:bg-primary/90 text-primary-foreground"
             >
               {saving && <Loader2 className="size-4 animate-spin" />}

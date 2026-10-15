@@ -7,13 +7,14 @@ import { HttpError, requireRole, toErrorResponse } from '@/lib/auth/account'
 import { getTemplate } from '@/lib/automations/templates'
 import { insertSteps, type BuilderStepInput } from '@/lib/automations/steps-tree'
 import {
+  templateNamesInSteps,
   validateStepsForActivation,
   validateTriggerForActivation,
 } from '@/lib/automations/validate'
 import { getT } from '@/lib/i18n/translate'
 import { asUser } from '@/server/db'
 import { readJsonBody } from '@/server/http'
-import { insertAutomation, listAutomations } from '@/server/repos/automations'
+import { insertAutomation, listAutomations, listTemplateBodies } from '@/server/repos/automations'
 
 const t = getT('Api')
 
@@ -78,11 +79,18 @@ export async function POST(request: Request) {
     // (is_active=false) are allowed to be incomplete so users can save
     // progress mid-build.
     if (is_active) {
+      const stepsToCheck = (effectiveSteps ?? []) as unknown as {
+        step_type: string
+        step_config: Record<string, unknown>
+      }[]
+      const templateNames = templateNamesInSteps(stepsToCheck)
+      const templates =
+        templateNames.length > 0
+          ? await asUser(ctx.userId, (db) => listTemplateBodies(db, ctx.accountId, templateNames))
+          : []
       const issues = [
         ...validateTriggerForActivation(effectiveTriggerType, effectiveTriggerConfig ?? {}),
-        ...validateStepsForActivation(
-          (effectiveSteps ?? []) as unknown as { step_type: string; step_config: Record<string, unknown> }[],
-        ),
+        ...validateStepsForActivation(stepsToCheck, { templates }),
       ]
       if (issues.length > 0) {
         return NextResponse.json(

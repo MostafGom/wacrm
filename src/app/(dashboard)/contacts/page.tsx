@@ -601,6 +601,7 @@ export default function ContactsPage() {
                         className="bg-popover border-border"
                       >
                         <DropdownMenuItem
+                          disabled={!canEdit}
                           onClick={(e) => {
                             e.stopPropagation();
                             openEditForm(contact);
@@ -613,6 +614,7 @@ export default function ContactsPage() {
                         <DropdownMenuSeparator className="bg-border" />
                         <DropdownMenuItem
                           variant="destructive"
+                          disabled={!canEdit}
                           onClick={(e) => {
                             e.stopPropagation();
                             confirmDelete(contact);

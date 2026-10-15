@@ -9,6 +9,7 @@ vi.mock('./meta-api', () => ({
 // a `.test` hostname that would never resolve. Each test sets the verdict.
 vi.mock('@/lib/webhooks/ssrf', () => ({
   isDeliverableUrl: vi.fn(async () => true),
+  webhookAllowedPrivateHosts: vi.fn(() => new Set(['fakes'])),
 }));
 
 import { ensureMediaHeaderHandle } from './template-header-handle';
@@ -234,10 +235,21 @@ describe('ensureMediaHeaderHandle', () => {
     const p = payload({ header_media_url: 'http://169.254.169.254/latest/meta-data/' });
     await expect(ensureMediaHeaderHandle(p, 'tok')).rejects.toThrow(/publicly reachable/);
 
-    expect(isDeliverableUrl).toHaveBeenCalledWith('http://169.254.169.254/latest/meta-data/');
+    expect(isDeliverableUrl).toHaveBeenCalledWith('http://169.254.169.254/latest/meta-data/', expect.anything());
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(uploadResumableMedia).not.toHaveBeenCalled();
     expect(p.header_handle).toBeUndefined();
+  });
+
+  it('honours the operator allow-list (WEBHOOK_ALLOWED_PRIVATE_HOSTS)', async () => {
+    vi.stubEnv('META_APP_ID', 'app-1');
+    vi.stubGlobal('fetch', vi.fn(async () => mediaResponse('image/png')));
+
+    await ensureMediaHeaderHandle(payload({ header_media_url: 'http://fakes:4010/media/x.png' }), 'tok');
+
+    expect(isDeliverableUrl).toHaveBeenCalledWith('http://fakes:4010/media/x.png', {
+      allowPrivateHosts: new Set(['fakes']),
+    });
   });
 
   it('applies the same guard to document and video headers', async () => {

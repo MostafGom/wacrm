@@ -90,6 +90,19 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       // campaign resumable server-side if this tab goes away (issue
       // #472) — and inserts the broadcast + recipients atomically.
       setProgress(5);
+      // Media-header templates (image/video/document) require a media
+      // URL on every send. Collected in the personalize step and applied
+      // to all recipients; falls back to the template's stored URL on the
+      // server when omitted. Saved on the broadcast too, so a server-side
+      // resume / "retry failed" sends the same header.
+      const headerType = payload.template.header_type;
+      const isMediaHeader =
+        headerType === 'image' ||
+        headerType === 'video' ||
+        headerType === 'document';
+      const headerMediaUrl = payload.headerMediaUrl?.trim();
+      const messageParams =
+        isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
       const { data: created, error: createError } = await createBroadcast({
         name: payload.name,
         template_name: payload.template.name,
@@ -102,6 +115,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
           csvContacts: payload.audience.csvContacts,
           excludeTagIds: payload.audience.excludeTagIds,
         },
+        ...(messageParams ? { header_media_url: messageParams.headerMediaUrl } : {}),
       });
       if (createError) {
         if (createError.code === 'no_contacts') {
@@ -120,19 +134,6 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       setProgress(30);
       let failedCount = 0;
       const totalRecipients = recipients.length;
-
-      // Media-header templates (image/video/document) require a media
-      // URL on every send. Collected in the personalize step and applied
-      // to all recipients; falls back to the template's stored URL on the
-      // server when omitted.
-      const headerType = payload.template.header_type;
-      const isMediaHeader =
-        headerType === 'image' ||
-        headerType === 'video' ||
-        headerType === 'document';
-      const headerMediaUrl = payload.headerMediaUrl?.trim();
-      const messageParams =
-        isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
 
       for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
         const batch = recipients.slice(i, i + SEND_BATCH_SIZE);

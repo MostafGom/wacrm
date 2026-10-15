@@ -424,6 +424,9 @@ export function WhatsAppConfig() {
         method: 'GET',
       });
       const data = (await res.json()) as RegistrationProbe;
+      // Reload the row first: fetchConfig clears the probe, so setting
+      // it before the reload made the diagnostic vanish immediately.
+      if (accountId) await fetchConfig();
       setRegistrationProbe(data);
       if (data.live) {
         toast.success(t('fullyWired'));
@@ -433,7 +436,6 @@ export function WhatsAppConfig() {
           { duration: 8000 },
         );
       }
-      if (accountId) await fetchConfig();
     } catch (err) {
       console.error('verify-registration failed:', err);
       toast.error(t('verifyEndpointUnreachable'));
@@ -539,6 +541,11 @@ export function WhatsAppConfig() {
         title={t("title")}
         description={t("description")}
       />
+      {!canEditSettings && (
+        <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          {t('adminOnlyConfig')}
+        </p>
+      )}
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
       <div className="space-y-6">
@@ -554,24 +561,26 @@ export function WhatsAppConfig() {
                 <AlertDescription className="text-amber-100/80 text-sm">
                   {statusMessage}
                 </AlertDescription>
-                <Button
-                  onClick={handleReset}
-                  disabled={resetting}
-                  size="sm"
-                  className="mt-3 bg-amber-600 hover:bg-amber-700 text-white"
-                >
-                  {resetting ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      {t('resetting')}
-                    </>
-                  ) : (
-                    <>
-                      <RotateCcw className="size-4" />
-                      {t('resetConfig')}
-                    </>
-                  )}
-                </Button>
+                {canEditSettings && (
+                  <Button
+                    onClick={handleReset}
+                    disabled={resetting}
+                    size="sm"
+                    className="mt-3 bg-amber-600 hover:bg-amber-700 text-white"
+                  >
+                    {resetting ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        {t('resetting')}
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="size-4" />
+                        {t('resetConfig')}
+                      </>
+                    )}
+                  </Button>
+                )}
               </div>
             </div>
           </Alert>
@@ -914,7 +923,7 @@ export function WhatsAppConfig() {
         <div className="flex flex-wrap gap-3">
           <Button
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || !canEditSettings}
             className="bg-primary hover:bg-primary/90 text-primary-foreground"
           >
             {saving ? (
@@ -944,7 +953,7 @@ export function WhatsAppConfig() {
               </>
             )}
           </Button>
-          {config && (
+          {config && canEditSettings && (
             <Button
               variant="outline"
               onClick={handleReset}

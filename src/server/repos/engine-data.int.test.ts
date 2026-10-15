@@ -20,12 +20,20 @@ import {
   getSendContact,
   handoffConversation,
   insertDeal,
+  nextRoundRobinAssignee,
   recordBotMessage,
   updateContactField,
   updateContactPhone,
   upsertContactCustomValue,
 } from "@/server/repos/engine-data";
-import { seedUser, teardownIntegrationDb, useIntegrationDb, type SeededUser } from "@/test/integration/helpers";
+import { insertAutomation } from "@/server/repos/automations";
+import {
+  joinAccount,
+  seedUser,
+  teardownIntegrationDb,
+  useIntegrationDb,
+  type SeededUser,
+} from "@/test/integration/helpers";
 
 let owner: SeededUser;
 let stranger: SeededUser;
@@ -236,5 +244,110 @@ describe("engine-data conversations + messages", () => {
       const deal = await db.selectFrom("deals").selectAll().where("title", "=", "Deal").executeTakeFirstOrThrow();
       expect(deal).toMatchObject({ status: "open", value: 12.5, account_id: owner.accountId });
     });
+  });
+});
+
+describe("engine-data round-robin assignment", () => {
+  it("rotates over the account's agents and up, per step, skipping viewers", async () => {
+    const team = await seedUser("Team owner");
+    const agentA = await seedUser("Agent A");
+    const agentB = await seedUser("Agent B");
+    const viewer = await seedUser("Viewer");
+    await joinAccount(agentA.id, team.accountId, "agent");
+    await joinAccount(agentB.id, team.accountId, "agent");
+    await joinAccount(viewer.id, team.accountId, "viewer");
+
+    const { stepId, otherStepId } = await asService(async (db) => {
+      const a = await insertAutomation(db, {
+        account_id: team.accountId,
+        user_id: team.id,
+        name: "RR",
+        description: null,
+        trigger_type: "new_message_received",
+        trigger_config: {},
+        is_active: true,
+      });
+      const rows = await db
+        .insertInto("automation_steps")
+        .values([
+          { automation_id: a.id, step_type: "assign_conversation", position: 0, step_config: { mode: "round_robin" } },
+          { automation_id: a.id, step_type: "assign_conversation", position: 1, step_config: { mode: "round_robin" } },
+        ])
+        .returning("id")
+        .execute();
+      return { stepId: rows[0].id, otherStepId: rows[1].id };
+    });
+
+    const eligible = [team.id, agentA.id, agentB.id].sort();
+    const picks: (string | null)[] = [];
+    for (let i = 0; i < 4; i++) {
+      // One transaction per pick, like the engine.
+      picks.push(await asService((db) => nextRoundRobinAssignee(db, team.accountId, stepId)));
+    }
+    expect(picks).toEqual([eligible[0], eligible[1], eligible[2], eligible[0]]);
+    expect(picks).not.toContain(viewer.id);
+
+    // Each step keeps its own rotation.
+    expect(await asService((db) => nextRoundRobinAssignee(db, team.accountId, otherStepId))).toBe(eligible[0]);
+
+    // A member who leaves the rotation is skipped; the cursor carries on.
+    await joinAccount(eligible[1], stranger.accountId, "agent");
+    expect(await asService((db) => nextRoundRobinAssignee(db, team.accountId, stepId))).toBe(eligible[2]);
+    expect(await asService((db) => nextRoundRobinAssignee(db, team.accountId, stepId))).toBe(eligible[0]);
+  });
+
+  it("serialises concurrent picks so they don't collide", async () => {
+    const team = await seedUser("Busy owner");
+    const agent = await seedUser("Busy agent");
+    await joinAccount(agent.id, team.accountId, "agent");
+    const stepId = await asService(async (db) => {
+      const a = await insertAutomation(db, {
+        account_id: team.accountId,
+        user_id: team.id,
+        name: "RR concurrent",
+        description: null,
+        trigger_type: "new_message_received",
+        trigger_config: {},
+        is_active: true,
+      });
+      const row = await db
+        .insertInto("automation_steps")
+        .values({ automation_id: a.id, step_type: "assign_conversation", position: 0, step_config: { mode: "round_robin" } })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      return row.id;
+    });
+    const picks = await Promise.all(
+      [0, 1].map(() => asService((db) => nextRoundRobinAssignee(db, team.accountId, stepId))),
+    );
+    expect(new Set(picks)).toEqual(new Set([team.id, agent.id]));
+  });
+
+  it("never reads another account's members or step", async () => {
+    // The step belongs to `owner`'s account; asking as the stranger finds no
+    // cursor, and the pick comes from the stranger's own account only.
+    const foreignStep = await asService(async (db) => {
+      const a = await insertAutomation(db, {
+        account_id: owner.accountId,
+        user_id: owner.id,
+        name: "RR foreign",
+        description: null,
+        trigger_type: "new_message_received",
+        trigger_config: {},
+        is_active: true,
+      });
+      const row = await db
+        .insertInto("automation_steps")
+        .values({ automation_id: a.id, step_type: "assign_conversation", position: 0, step_config: { mode: "round_robin" } })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      return row.id;
+    });
+    const loner = await seedUser("Loner");
+    expect(await asService((db) => nextRoundRobinAssignee(db, loner.accountId, foreignStep))).toBe(loner.id);
+    const cfg = await asService((db) =>
+      db.selectFrom("automation_steps").select("step_config").where("id", "=", foreignStep).executeTakeFirstOrThrow(),
+    );
+    expect(cfg.step_config).toEqual({ mode: "round_robin" });
   });
 });

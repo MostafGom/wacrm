@@ -22,6 +22,8 @@ export interface CreateBroadcastInput {
   template_language: string;
   template_variables: Record<string, VariableMapping>;
   audience: AudienceConfig;
+  /** Media for an image/video/document header — stored so resumes can resend it. */
+  header_media_url?: string;
 }
 
 export type RecipientResultInput =

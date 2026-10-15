@@ -106,18 +106,18 @@ describe("whatsapp-config repo", () => {
         ])
         .execute();
     });
-    expect(await asUser(owner.id, (db) => getSettingsOverviewCounts(db, owner.accountId, owner.id))).toEqual({
+    expect(await asUser(owner.id, (db) => getSettingsOverviewCounts(db, owner.accountId))).toEqual({
       templates: 2,
       templates_pending: 1,
       tags: 1,
       custom_fields: 1,
       whatsapp_configured: true,
     });
-    // Templates / tags count the caller's own rows; fields count the account's.
-    expect(await asUser(viewer.id, (db) => getSettingsOverviewCounts(db, owner.accountId, viewer.id))).toEqual({
-      templates: 0,
-      templates_pending: 0,
-      tags: 0,
+    // Workspace-wide: every member sees the same numbers, whoever created the rows.
+    expect(await asUser(viewer.id, (db) => getSettingsOverviewCounts(db, owner.accountId))).toEqual({
+      templates: 2,
+      templates_pending: 1,
+      tags: 1,
       custom_fields: 1,
       whatsapp_configured: true,
     });

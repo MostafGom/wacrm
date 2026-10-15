@@ -6,6 +6,7 @@ import {
   type BuilderStepInput,
 } from '@/lib/automations/steps-tree'
 import {
+  templateNamesInSteps,
   validateStepsForActivation,
   validateTriggerForActivation,
 } from '@/lib/automations/validate'
@@ -15,6 +16,7 @@ import { readJsonBody } from '@/server/http'
 import {
   deleteAutomation,
   getAutomation,
+  listTemplateBodies,
   updateAutomation,
   type AutomationPatch,
 } from '@/server/repos/automations'
@@ -99,11 +101,13 @@ export async function PATCH(
         const mergedSteps = steps
           ? (steps as { step_type: string; step_config: Record<string, unknown> }[])
           : await loadStepsTree(db, ctx.accountId, id)
+        const templates = await listTemplateBodies(db, ctx.accountId, templateNamesInSteps(mergedSteps))
         const issues = [
           ...validateTriggerForActivation(mergedTriggerType, mergedTriggerConfig),
-          ...validateStepsForActivation(mergedSteps),
+          ...validateStepsForActivation(mergedSteps, { templates }),
         ]
-        if (issues.length > 0) return { issues }
+        // Turning it on vs. editing one that already runs.
+        if (issues.length > 0) return { issues, activating: !existing.is_active }
       }
 
       if (Object.keys(update).length > 0) {
@@ -118,7 +122,7 @@ export async function PATCH(
     if ('issues' in outcome) {
       return NextResponse.json(
         {
-          error: t('automations.invalidActiveConfig'),
+          error: t(outcome.activating ? 'automations.invalidActivateConfig' : 'automations.invalidActiveConfig'),
           issues: outcome.issues,
         },
         { status: 400 },

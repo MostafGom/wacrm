@@ -88,12 +88,39 @@ export async function dispatchInboundToAiReply(
     if (!conv) return
     if (conv.assigned_agent_id) return // a human owns this thread
     if (conv.ai_autoreply_disabled) return // handed off / turned off here
-    // Cheap early-out; the authoritative cap check is the atomic claim
-    // below (this read can race a concurrent inbound).
-    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) return
-
     const messages = await buildConversationContext(run, accountId, conversationId)
     if (messages.length === 0) return
+
+    // Stop auto-replying on this thread and hand it to a human. We
+    // (a) pause the bot here (sticky until re-enabled), (b) route the
+    // conversation to the configured handoff agent — null leaves it in
+    // the shared queue — and (c) leave a short internal note so whoever
+    // picks it up has context. Assigning fires the
+    // `on_conversation_assigned` trigger, which notifies the agent.
+    const handOff = async (state: NonNullable<typeof conv>, context: typeof messages) => {
+      const update: ConversationAiPatch = {
+        ai_autoreply_disabled: true,
+        ai_handoff_summary: buildHandoffSummary({
+          messages: context,
+          replyCount: state.ai_reply_count ?? 0,
+        }),
+      }
+      // Only set the assignee when a target is configured AND the thread
+      // isn't already owned — never stomp an existing human assignment.
+      if (config.handoffAgentId && !state.assigned_agent_id) {
+        update.assigned_agent_id = config.handoffAgentId
+      }
+      await run((db) => updateConversationAi(db, accountId, conversationId, update))
+    }
+
+    // Out of replies on this thread → hand it to a human (the settings
+    // promise: "can't help — or hits the reply cap — it pauses and
+    // routes the chat here, with a short note"). No LLM call needed.
+    // The atomic claim below stays the authoritative cap for a race.
+    if (conv.ai_reply_count >= config.autoReplyMaxPerConversation) {
+      await handOff(conv, messages)
+      return
+    }
 
     // Account-wide throttle on the shared BYO key. The per-conversation
     // cap bounds one thread; this bounds a burst across many threads (a
@@ -156,29 +183,8 @@ export async function dispatchInboundToAiReply(
     })
 
     if (handoff || !text) {
-      // The model can't (or shouldn't) answer — stop auto-replying on
-      // this thread and hand it to a human. We (a) pause the bot here
-      // (sticky until re-enabled), (b) route the conversation to the
-      // configured handoff agent — null leaves it in the shared queue —
-      // and (c) leave a short internal note so whoever picks it up has
-      // context. Assigning fires the `on_conversation_assigned` trigger,
-      // which notifies the agent.
-      const summary = buildHandoffSummary({
-        messages,
-        replyCount: conv.ai_reply_count ?? 0,
-      })
-      const update: ConversationAiPatch = {
-        ai_autoreply_disabled: true,
-        ai_handoff_summary: summary,
-      }
-      // Only set the assignee when a target is configured AND the thread
-      // isn't already owned — never stomp an existing human assignment.
-      if (config.handoffAgentId && !conv.assigned_agent_id) {
-        update.assigned_agent_id = config.handoffAgentId
-      }
-      await run((db) =>
-        updateConversationAi(db, accountId, conversationId, update),
-      )
+      // The model can't (or shouldn't) answer.
+      await handOff(conv, messages)
       return
     }
 

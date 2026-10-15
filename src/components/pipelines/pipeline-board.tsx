@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { formatCurrency } from "@/lib/currency";
+import { cn } from "@/lib/utils";
 import { useTranslations } from "next-intl";
 
 interface PipelineBoardProps {
@@ -28,6 +29,10 @@ interface PipelineBoardProps {
   onDealMoved: (dealId: string, newStageId: string) => void;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
+  /** Deal writes (create / move) are agent+ on the server. When false
+   *  the per-column "Add Deal" is disabled with a read-only tooltip and
+   *  cards can't be dragged; cards still open the (read-only) editor. */
+  canEditDeals?: boolean;
 }
 
 export function PipelineBoard({
@@ -36,6 +41,7 @@ export function PipelineBoard({
   onDealMoved,
   onAddDeal,
   onEditDeal,
+  canEditDeals = true,
 }: PipelineBoardProps) {
   const { defaultCurrency } = useAuth();
   const [activeDealId, setActiveDealId] = useState<string | null>(null);
@@ -73,6 +79,7 @@ export function PipelineBoard({
 
   function handleDragEnd(event: DragEndEvent) {
     setActiveDealId(null);
+    if (!canEditDeals) return;
     const { active, over } = event;
     if (!over) return;
     const dealId = String(active.id);
@@ -119,6 +126,7 @@ export function PipelineBoard({
               currency={defaultCurrency}
               onAddDeal={onAddDeal}
               onEditDeal={onEditDeal}
+              canEditDeals={canEditDeals}
             />
           );
         })}
@@ -193,6 +201,7 @@ function StageColumn({
   currency,
   onAddDeal,
   onEditDeal,
+  canEditDeals,
 }: {
   stage: PipelineStage;
   deals: Deal[];
@@ -200,8 +209,10 @@ function StageColumn({
   currency: string;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
+  canEditDeals: boolean;
 }) {
   const t = useTranslations("Pipelines.board");
+  const tGate = useTranslations("GatedButton");
   const { setNodeRef, isOver } = useDroppable({ id: stage.id });
 
   return (
@@ -248,20 +259,34 @@ function StageColumn({
               deal={deal}
               stage={stage}
               onEdit={onEditDeal}
+              dragDisabled={!canEditDeals}
             />
           ))
         )}
       </div>
 
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => onAddDeal(stage.id)}
-        className="mt-3 w-full justify-start border border-dashed border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground"
+      {/* Same read-only idiom as GatedButton (title on a non-disabled
+          wrapper so the tooltip shows in every browser), but full-width
+          to fit the column. */}
+      <span
+        className={cn("mt-3 flex w-full", !canEditDeals && "cursor-not-allowed")}
+        title={
+          canEditDeals
+            ? undefined
+            : tGate("readOnly", { action: tGate("reasons.createDeals") })
+        }
       >
-        <Plus className="mr-1 h-3 w-3" />
-        {t("addDeal")}
-      </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!canEditDeals}
+          onClick={() => onAddDeal(stage.id)}
+          className="w-full justify-start border border-dashed border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground"
+        >
+          <Plus className="mr-1 h-3 w-3" />
+          {t("addDeal")}
+        </Button>
+      </span>
     </div>
   );
 }
@@ -270,13 +295,16 @@ function DraggableDealCard({
   deal,
   stage,
   onEdit,
+  dragDisabled,
 }: {
   deal: Deal;
   stage: PipelineStage;
   onEdit: (deal: Deal) => void;
+  dragDisabled: boolean;
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: deal.id,
+    disabled: dragDisabled,
   });
 
   return (

@@ -39,6 +39,8 @@ const h = vi.hoisted(() => ({
     } as Record<string, unknown>,
     /** Writes the fake DB accepted, by table + operation. */
     writes: [] as { table: string; op: string; values: Record<string, unknown> }[],
+    /** message_templates rows (name, language, body_text) per account. */
+    templates: [] as { account_id: string; name: string; language: string | null; body_text: string }[],
   },
 }))
 
@@ -68,6 +70,8 @@ vi.mock('@/server/repos/automations', () => {
       return { ...values, id: 'auto-copy' }
     },
     listAutomationSteps: async () => [],
+    listTemplateBodies: async (_db: unknown, accountId: string, names: string[]) =>
+      state.templates.filter((t) => t.account_id === accountId && names.includes(t.name)),
     insertAutomationSteps: async () => {},
     deleteAutomationSteps: async () => {},
   }
@@ -80,6 +84,8 @@ const params = Promise.resolve({ id: 'auto-1' })
 
 beforeEach(() => {
   h.state.writes = []
+  h.state.templates = []
+  h.state.row.is_active = false
   caller.accountId = 'acc-new'
 })
 
@@ -152,5 +158,52 @@ describe('automations/[id] tenancy (GHSA-xvrq-88hg-44q6)', () => {
     } finally {
       caller.role = 'owner'
     }
+  })
+})
+
+describe('PATCH activation validation', () => {
+  const patch = (body: Record<string, unknown>) =>
+    PATCH(new Request('http://t/', { method: 'PATCH', body: JSON.stringify(body) }), { params })
+
+  beforeEach(() => {
+    caller.accountId = 'acc-old'
+  })
+
+  it('says "activate" when an inactive automation is being activated', async () => {
+    const res = await patch({ is_active: true }) // the row has no steps
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('Cannot activate automation with invalid configuration')
+    expect(h.state.writes).toEqual([])
+  })
+
+  it('says "keep active" when an active automation is edited into an invalid state', async () => {
+    h.state.row.is_active = true
+    const res = await patch({ steps: [{ step_type: 'send_message', step_config: { text: '' } }] })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('Cannot keep automation active with invalid configuration')
+  })
+
+  it("requires a value for each of the chosen template's body placeholders", async () => {
+    h.state.templates = [
+      { account_id: 'acc-old', name: 'order_update', language: 'en_US', body_text: 'Hi {{1}}, order {{2}} shipped' },
+      // Another account's template of the same name must not be consulted.
+      { account_id: 'acc-new', name: 'order_update', language: 'en_US', body_text: 'Hi {{1}} {{2}} {{3}}' },
+    ]
+    const step = (variables?: Record<string, string>) => ({
+      step_type: 'send_template',
+      step_config: { template_name: 'order_update', language: 'en_US', ...(variables ? { variables } : {}) },
+    })
+
+    const missing = await patch({ is_active: true, steps: [step({ '1': 'Ann' })] })
+    expect(missing.status).toBe(400)
+    const body = (await missing.json()) as { issues: { path: string; message: string }[] }
+    expect(body.issues).toEqual([
+      { path: 'steps[0].variables.2', message: 'value for template variable {{2}} is required' },
+    ])
+
+    const ok = await patch({ is_active: true, steps: [step({ '1': 'Ann', '2': '#42' })] })
+    expect(ok.status).toBe(200)
   })
 })

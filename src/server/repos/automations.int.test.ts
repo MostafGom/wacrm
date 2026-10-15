@@ -16,6 +16,7 @@ import {
   listAutomationLogs,
   listAutomations,
   listScopeSteps,
+  listTemplateBodies,
   updateAutomation,
 } from "@/server/repos/automations";
 import { insertAutomationLog } from "@/server/repos/automation-runs";
@@ -237,5 +238,20 @@ describe("logs + builder resources", () => {
     const theirs = await asUser(stranger.id, (db) => getBuilderResources(db, stranger.accountId));
     expect(theirs.templates).toEqual([]);
     expect(theirs.stages.map((s) => s.name)).not.toContain("New");
+  });
+
+  it("lists template bodies by name for activation checks, inside the account only", async () => {
+    await asService(async (db) => {
+      await db
+        .insertInto("message_templates")
+        .values([
+          { account_id: owner.accountId, user_id: owner.id, name: "vars", language: "en_US", body_text: "Hi {{1}}" },
+          { account_id: stranger.accountId, user_id: stranger.id, name: "vars", language: "en_US", body_text: "x" },
+        ])
+        .execute();
+    });
+    const rows = await asUser(owner.id, (db) => listTemplateBodies(db, owner.accountId, ["vars", "missing"]));
+    expect(rows).toEqual([{ name: "vars", language: "en_US", body_text: "Hi {{1}}" }]);
+    expect(await asUser(owner.id, (db) => listTemplateBodies(db, owner.accountId, []))).toEqual([]);
   });
 });

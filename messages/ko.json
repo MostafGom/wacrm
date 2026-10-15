@@ -506,19 +506,14 @@
       "uploadDropzone": "클릭하여 CSV 파일 선택",
       "uploadHint": "브라우저 제한까지 .csv 업로드 가능",
       "rowsReady": "{count}개 행 준비됨",
-      "rowsReady_plural": "{count}개 행 준비됨",
       "preview": "미리보기 · 처음 {count}개",
       "previewTags": "태그 {tags}개 · 연락처 {contacts}개",
-      "previewTags_plural": "태그 {tags}개 · 연락처 {contacts}개",
       "moreRows": "표시되지 않은 행 {count}개 더 있음",
-      "moreRows_plural": "표시되지 않은 행 {count}개 더 있음",
       "importComplete": "가져오기 완료",
       "resultImported": "{count}개 가져옴",
       "resultTags": "태그 {count}개 지정됨",
-      "resultTags_plural": "태그 {count}개 지정됨",
       "resultSkipped": "{count}개 건너뜀",
       "resultInvalidPhone": "전화번호 오류 {count}개",
-      "resultInvalidPhone_plural": "전화번호 오류 {count}개",
       "resultFailed": "{count}개 실패",
       "invalidPhoneHint": "전화번호는 +와 국가 코드로 시작해야 합니다 (예: +14155550123). 국가 코드가 없는 번호는 다른 국가로 발송될 수 있습니다.",
       "failedRowsHeading": "실패한 행",
@@ -534,20 +529,14 @@
       "cancel": "취소",
       "close": "닫기",
       "importBtn": "{count}개 연락처 가져오기",
-      "importBtn_plural": "{count}개 연락처 가져오기",
       "toastNoValidRows": "유효한 행을 찾을 수 없습니다. CSV에 \"phone\" 열 헤더가 있는지 확인하세요.",
       "toastTagsWarning": "연락처는 가져왔지만 일부 태그 지정에 실패했습니다.",
       "toastImported": "연락처 {count}개를 가져왔습니다",
-      "toastImported_plural": "연락처 {count}개를 가져왔습니다",
       "toastTagsAssigned": "태그 지정 {count}건을 적용했습니다",
-      "toastTagsAssigned_plural": "태그 지정 {count}건을 적용했습니다",
       "toastTagsSkipped": "알 수 없는 태그를 건너뛰었습니다 (설정에서 먼저 만드세요): {sample}{more}",
       "toastSkipped": "중복 {count}건을 건너뛰었습니다",
-      "toastSkipped_plural": "중복 {count}건을 건너뛰었습니다",
       "toastInvalidPhone": "연락처 {count}개에 사용할 수 있는 전화번호가 없었습니다",
-      "toastInvalidPhone_plural": "연락처 {count}개에 사용할 수 있는 전화번호가 없었습니다",
       "toastFailed": "연락처 {count}개를 가져오지 못했습니다",
-      "toastFailed_plural": "연락처 {count}개를 가져오지 못했습니다",
       "toastError": "가져오기 실패",
       "notAuthenticated": "인증되지 않았습니다",
       "notLinkedToAccount": "프로필이 계정에 연결되어 있지 않습니다.",
@@ -656,7 +645,7 @@
     "settings": {
       "managePipeline": "파이프라인 관리",
       "deletePipeline": "파이프라인 삭제",
-      "deletePipelineDesc": "이 파이프라인의 모든 딜이 보관 처리됩니다. 되돌릴 수 없습니다.",
+      "deletePipelineDesc": "이 파이프라인의 모든 딜이 영구적으로 삭제됩니다. 되돌릴 수 없습니다.",
       "cancel": "취소",
       "deleting": "삭제 중...",
       "deletePipelineBtn": "파이프라인 삭제",
@@ -1083,7 +1072,9 @@
         "languageLabel": "언어",
         "select": "템플릿 선택…",
         "unknown": "{name} ({lang}) — 승인 목록에 없음",
-        "unknownLang": "알 수 없음"
+        "unknownLang": "알 수 없음",
+        "variableLabel": "변수 {placeholder}",
+        "variablesHint": "템플릿 본문 변수로 순서대로 전송됩니다."
       },
       "branches": {
         "yes": "예",
@@ -1128,6 +1119,7 @@
         "placeholderTime": "HH:mm-HH:mm",
         "placeholderContact": "이름 / 이메일 / 회사",
         "placeholderTag": "태그 id",
+        "placeholderMessageContains": "메시지에 포함된 텍스트",
         "urlLabel": "URL",
         "headersLabel": "헤더",
         "placeholderHeaders": "{\"Authorization\": \"Bearer ...\"}",
@@ -1771,7 +1763,8 @@
       "phoneNumberIdNotNumeric": "전화번호 ID는 숫자만 포함해야 합니다. 전화번호가 아닌, Meta → WhatsApp → API 설정에 표시된 숫자 ID를 복사하세요.",
       "wabaIdNotNumeric": "WhatsApp 비즈니스 계정 ID는 숫자만 포함해야 합니다. Meta → WhatsApp → API 설정에서 복사하세요.",
       "wabaSubscribed": "WhatsApp 비즈니스 계정이 이 앱에 구독되어 있어 수신 웹훅을 받을 수 있습니다.",
-      "wabaNotSubscribed": "WhatsApp 비즈니스 계정이 이 앱에 구독되어 있지 않아 Meta가 수신 웹훅을 전달하지 않습니다. 액세스 토큰을 다시 입력하고 저장해 구독하세요."
+      "wabaNotSubscribed": "WhatsApp 비즈니스 계정이 이 앱에 구독되어 있지 않아 Meta가 수신 웹훅을 전달하지 않습니다. 액세스 토큰을 다시 입력하고 저장해 구독하세요.",
+      "adminOnlyConfig": "관리자와 소유자만 WhatsApp 연결을 변경할 수 있습니다."
     },
     "sections": {
       "overview": "개요",
@@ -2206,7 +2199,9 @@
       "createFlows": "플로우를 만들",
       "createPipelines": "파이프라인을 만들",
       "createDeals": "거래를 만들",
-      "sendMessages": "메시지를 보낼"
+      "sendMessages": "메시지를 보낼",
+      "editContacts": "연락처를 편집할",
+      "editDeals": "거래를 편집할"
     }
   },
   "Metadata": {
@@ -2448,6 +2443,10 @@
       "waitUnitInvalid": "대기 단위는 분, 시간 또는 일이어야 합니다",
       "conditionSubjectRequired": "조건 대상은 필수입니다",
       "conditionOperandRequired": "조건 피연산자는 필수입니다",
+      "conditionValueRequired": "조건 값은 필수입니다",
+      "conditionTimeInvalid": "시간대는 HH:mm-HH:mm 형식이어야 합니다",
+      "conditionSubjectInvalid": "조건 대상은 tag_presence, contact_field, message_content, time_of_day 중 하나여야 합니다",
+      "templateVariableRequired": "템플릿 변수 {placeholder}의 값은 필수입니다",
       "webhookUrlRequired": "웹훅 URL은 필수입니다",
       "webhookUrlScheme": "웹훅 URL은 http 또는 https를 사용해야 합니다",
       "webhookUrlInvalid": "웹훅 URL이 올바른 URL이 아닙니다",
@@ -2658,7 +2657,8 @@
       "recipientsRequired": "`recipients`(권장) 또는 `phone_numbers`를 제공하세요 — 비어 있지 않은 배열이어야 합니다",
       "templateNameRequired": "템플릿 이름은 필수입니다",
       "templateMalformed": "로컬 템플릿 데이터가 손상되었습니다 — 브로드캐스트 전에 설정에서 \"Meta에서 동기화\"를 실행해 복구하세요.",
-      "invalidPhoneFormat": "전화번호 형식이 올바르지 않습니다"
+      "invalidPhoneFormat": "전화번호 형식이 올바르지 않습니다",
+      "deleteWhileSending": "이 브로드캐스트는 아직 전송 중입니다. 삭제하기 전에 완료될 때까지 기다리거나 다시 시작하세요."
     },
     "whatsappConfig": {
       "fetchFailed": "설정을 가져오지 못했습니다",

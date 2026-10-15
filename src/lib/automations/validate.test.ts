@@ -169,7 +169,7 @@ describe("validateStepsForActivation", () => {
     const issues = validateStepsForActivation([
       {
         step_type: "condition",
-        step_config: { subject: "tag", operand: "vip" },
+        step_config: { subject: "tag_presence", operand: "vip" },
         branches: {
           yes: [{ step_type: "add_tag", step_config: { tag_id: "" } }],
           no: [
@@ -204,6 +204,96 @@ describe("validateStepsForActivation", () => {
       "steps[0].operand",
       "steps[0].subject",
     ]);
+  });
+});
+
+describe("validateStepsForActivation — condition subjects", () => {
+  const cond = (step_config: Record<string, unknown>) =>
+    validateStepsForActivation([{ step_type: "condition", step_config }]);
+
+  it("does not require an operand for message_content (the engine reads only value)", () => {
+    expect(cond({ subject: "message_content", operand: "", value: "urgent" })).toEqual([]);
+    expect(cond({ subject: "message_content", value: "urgent" })).toEqual([]);
+  });
+
+  it("requires the text to look for on message_content", () => {
+    expect(cond({ subject: "message_content", operand: "", value: " " })).toEqual([
+      { path: "steps[0].value", message: "condition value is required" },
+    ]);
+  });
+
+  it("requires the tag for tag_presence", () => {
+    expect(cond({ subject: "tag_presence", operand: "" })).toEqual([
+      { path: "steps[0].operand", message: "condition operand is required" },
+    ]);
+    expect(cond({ subject: "tag_presence", operand: "tag-uuid" })).toEqual([]);
+  });
+
+  it("requires the field for contact_field; an empty value means 'is empty'", () => {
+    expect(cond({ subject: "contact_field", operand: "", value: "Acme" })).toEqual([
+      { path: "steps[0].operand", message: "condition operand is required" },
+    ]);
+    expect(cond({ subject: "contact_field", operand: "company", value: "" })).toEqual([]);
+  });
+
+  it("requires an HH:mm-HH:mm window for time_of_day", () => {
+    expect(cond({ subject: "time_of_day", operand: "" })).toEqual([
+      { path: "steps[0].operand", message: "condition operand is required" },
+    ]);
+    expect(cond({ subject: "time_of_day", operand: "9am to 5pm" })).toEqual([
+      { path: "steps[0].operand", message: "time window must look like HH:mm-HH:mm" },
+    ]);
+    expect(cond({ subject: "time_of_day", operand: "25:00-26:00" })).toEqual([
+      { path: "steps[0].operand", message: "time window must look like HH:mm-HH:mm" },
+    ]);
+    expect(cond({ subject: "time_of_day", operand: "18:00-09:00" })).toEqual([]);
+    expect(cond({ subject: "time_of_day", operand: "9:30-17:00" })).toEqual([]);
+  });
+
+  it("rejects a subject the engine doesn't know", () => {
+    expect(cond({ subject: "weather", operand: "sunny" })).toEqual([
+      {
+        path: "steps[0].subject",
+        message: "condition subject must be tag_presence, contact_field, message_content or time_of_day",
+      },
+    ]);
+  });
+});
+
+describe("validateStepsForActivation — template variables", () => {
+  const templates = [
+    { name: "order_update", language: "en_US", body_text: "Hi {{1}}, order {{2}} shipped" },
+    { name: "order_update", language: "es", body_text: "Hola {{1}}" },
+    { name: "plain", language: "en", body_text: "No variables here" },
+  ];
+  const tpl = (step_config: Record<string, unknown>) =>
+    validateStepsForActivation([{ step_type: "send_template", step_config }], { templates });
+
+  it("requires a value for every body placeholder of the matched template", () => {
+    expect(tpl({ template_name: "order_update", language: "en_US", variables: { "1": "Ann" } })).toEqual([
+      { path: "steps[0].variables.2", message: "value for template variable {{2}} is required" },
+    ]);
+    expect(tpl({ template_name: "order_update", language: "en_US" }).map((i) => i.path)).toEqual([
+      "steps[0].variables.1",
+      "steps[0].variables.2",
+    ]);
+    expect(
+      tpl({ template_name: "order_update", language: "en_US", variables: { "1": "Ann", "2": "#42" } }),
+    ).toEqual([]);
+  });
+
+  it("matches the template's language, tolerating en / en_US", () => {
+    expect(tpl({ template_name: "order_update", language: "es_MX", variables: { "1": "Ana" } })).toEqual([]);
+    expect(tpl({ template_name: "plain", language: "en_US" })).toEqual([]);
+  });
+
+  it("skips the check when the template isn't known locally or no lookup is given", () => {
+    expect(tpl({ template_name: "unsynced", language: "en_US" })).toEqual([]);
+    expect(
+      validateStepsForActivation([
+        { step_type: "send_template", step_config: { template_name: "order_update", language: "en_US" } },
+      ]),
+    ).toEqual([]);
   });
 });
 

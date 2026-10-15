@@ -1,6 +1,7 @@
 // /api/broadcasts
 //   GET  → { broadcasts: Broadcast[] }                        newest first (any member)
-//   POST { name, template_name, template_language?, template_variables?, audience, draft? }
+//   POST { name, template_name, template_language?, template_variables?, audience, draft?,
+//          header_media_url? }   (http(s) media for an image/video/document header)
 //        draft: true → { broadcast }                         (agent+)  row only, no recipients
 //        otherwise   → { broadcast, recipients: [{ id, phone, template_params }] }   (agent+)
 //          Resolves the audience (CSV numbers the account lacks become
@@ -35,6 +36,24 @@ export async function GET() {
   }
 }
 
+/** Optional http(s) URL of the header media; null when absent or blank. */
+function parseHeaderMediaUrl(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw new HttpError(400, tCommon('invalidRequestBody'))
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    throw new HttpError(400, tCommon('invalidRequestBody'))
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || trimmed.length > 2048) {
+    throw new HttpError(400, tCommon('invalidRequestBody'))
+  }
+  return trimmed
+}
+
 export async function POST(request: Request) {
   try {
     // Running (or drafting) a broadcast is a write; viewers are read-only
@@ -51,6 +70,7 @@ export async function POST(request: Request) {
     const variables = parseVariableMappings(body.template_variables)
     const audience = parseAudienceConfig(body.audience)
     if (!variables || !audience) throw new HttpError(400, tCommon('invalidRequestBody'))
+    const headerMediaUrl = parseHeaderMediaUrl(body.header_media_url)
 
     if (body.draft === true) {
       if (!name.trim()) throw new HttpError(400, tCommon('invalidRequestBody'))
@@ -65,6 +85,7 @@ export async function POST(request: Request) {
           audience_filter: { type: audience.type, tagIds: audience.tagIds },
           status: 'draft',
           total_recipients: 0,
+          header_media_url: headerMediaUrl,
         }),
       )
       return NextResponse.json({ broadcast }, { status: 201 })
@@ -102,6 +123,7 @@ export async function POST(request: Request) {
           },
           status: 'sending',
           total_recipients: contacts.length,
+          header_media_url: headerMediaUrl,
         })
         const rows = await insertPendingRecipients(
           db,

@@ -71,6 +71,8 @@ export interface BroadcastInsert {
   audience_filter: unknown;
   status: "draft" | "sending";
   total_recipients: number;
+  /** Media for an image/video/document header, reused by server-side resumes. */
+  header_media_url?: string | null;
 }
 
 /** Dashboard insert (draft, or the parent of a wizard send). */

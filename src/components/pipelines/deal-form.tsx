@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useAuth } from "@/hooks/use-auth";
 import { CURRENCIES } from "@/lib/currency";
+import { cn } from "@/lib/utils";
 import {
   createDeal,
   deleteDeal,
@@ -44,6 +45,10 @@ interface DealFormProps {
   stages: PipelineStage[];
   defaultStageId?: string;
   onSaved: () => void;
+  /** Deal writes are agent+ on the server. When false the sheet is a
+   *  read-only view: fields are locked, Save / Mark as Won / Lost /
+   *  Reopen are disabled with a read-only tooltip and Delete is hidden. */
+  canEdit?: boolean;
 }
 
 export function DealForm({
@@ -54,8 +59,15 @@ export function DealForm({
   stages,
   defaultStageId,
   onSaved,
+  canEdit = true,
 }: DealFormProps) {
   const t = useTranslations("Pipelines.form");
+  const tGate = useTranslations("GatedButton");
+  const readOnly = !canEdit;
+  // Tooltip for disabled write controls — same copy GatedButton uses.
+  const readOnlyTitle = readOnly
+    ? tGate("readOnly", { action: tGate("reasons.editDeals") })
+    : undefined;
   const { accountId, defaultCurrency } = useAuth();
 
   const [title, setTitle] = useState("");
@@ -144,6 +156,7 @@ export function DealForm({
   }, [open, contactId]);
 
   async function handleSave() {
+    if (readOnly) return;
     if (!title.trim() || !contactId || !stageId) {
       toast.error(t("toastRequired"));
       return;
@@ -196,7 +209,7 @@ export function DealForm({
   }
 
   async function handleStatusChange(status: DealStatus) {
-    if (!deal) return;
+    if (!deal || readOnly) return;
     setStatusAction(status);
     const { error } = await updateDeal(deal.id, { status });
     setStatusAction(null);
@@ -212,7 +225,7 @@ export function DealForm({
   }
 
   async function handleDelete() {
-    if (!deal) return;
+    if (!deal || readOnly) return;
     setDeleting(true);
     const { error } = await deleteDeal(deal.id);
     setDeleting(false);
@@ -245,6 +258,7 @@ export function DealForm({
               <Input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
+                readOnly={readOnly}
                 placeholder={t("titlePlaceholder")}
                 className="border-border bg-muted text-foreground"
               />
@@ -255,6 +269,7 @@ export function DealForm({
               <select
                 value={contactId}
                 onChange={(e) => setContactId(e.target.value)}
+                disabled={readOnly}
                 className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
               >
                 <option value="">{t("selectContact")}</option>
@@ -285,6 +300,7 @@ export function DealForm({
                     type="number"
                     value={value}
                     onChange={(e) => setValue(e.target.value)}
+                    readOnly={readOnly}
                     placeholder="0"
                     className="border-border bg-muted pl-7 text-foreground"
                   />
@@ -295,6 +311,7 @@ export function DealForm({
                 <select
                   value={currency}
                   onChange={(e) => setCurrency(e.target.value)}
+                  disabled={readOnly}
                   className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary"
                 >
                   {CURRENCIES.map((c) => (
@@ -312,6 +329,7 @@ export function DealForm({
                 type="date"
                 value={expectedCloseDate}
                 onChange={(e) => setExpectedCloseDate(e.target.value)}
+                readOnly={readOnly}
                 className="border-border bg-muted text-foreground"
               />
             </div>
@@ -321,6 +339,7 @@ export function DealForm({
               <select
                 value={stageId}
                 onChange={(e) => setStageId(e.target.value)}
+                disabled={readOnly}
                 className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary"
               >
                 {stages.map((s) => (
@@ -336,6 +355,7 @@ export function DealForm({
               <select
                 value={assignedTo}
                 onChange={(e) => setAssignedTo(e.target.value)}
+                disabled={readOnly}
                 className="h-9 w-full rounded-lg border border-border bg-muted px-2.5 text-sm text-foreground outline-none focus:border-primary"
               >
                 <option value="">{t("unassigned")}</option>
@@ -352,6 +372,7 @@ export function DealForm({
               <Textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
+                readOnly={readOnly}
                 placeholder={t("notesPlaceholder")}
                 className="min-h-[100px] border-border bg-muted text-foreground"
               />
@@ -362,11 +383,14 @@ export function DealForm({
                 <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                   {t("status")}
                 </p>
-                <div className="flex gap-2">
+                <div
+                  className={cn("flex gap-2", readOnly && "cursor-not-allowed")}
+                  title={readOnlyTitle}
+                >
                   <Button
                     type="button"
                     onClick={() => handleStatusChange("won")}
-                    disabled={!!statusAction || deal.status === "won"}
+                    disabled={readOnly || !!statusAction || deal.status === "won"}
                     className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                   >
                     {statusAction === "won" ? (
@@ -381,7 +405,7 @@ export function DealForm({
                   <Button
                     type="button"
                     onClick={() => handleStatusChange("lost")}
-                    disabled={!!statusAction || deal.status === "lost"}
+                    disabled={readOnly || !!statusAction || deal.status === "lost"}
                     className="flex-1 bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
                   >
                     {statusAction === "lost" ? (
@@ -394,7 +418,7 @@ export function DealForm({
                     )}
                   </Button>
                 </div>
-                {deal.status && deal.status !== "open" && (
+                {deal.status && deal.status !== "open" && !readOnly && (
                   <Button
                     type="button"
                     variant="ghost"
@@ -418,16 +442,22 @@ export function DealForm({
               >
                 {t("cancel")}
               </Button>
-              <Button
-                onClick={handleSave}
-                disabled={saving || !title.trim() || !contactId || !stageId}
-                className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+              <span
+                className={cn("flex flex-1", readOnly && "cursor-not-allowed")}
+                title={readOnlyTitle}
               >
-                {saving ? t("saving") : deal ? t("saveChanges") : t("createDeal")}
-              </Button>
+                <Button
+                  onClick={handleSave}
+                  disabled={readOnly || saving || !title.trim() || !contactId || !stageId}
+                  className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+                >
+                  {saving ? t("saving") : deal ? t("saveChanges") : t("createDeal")}
+                </Button>
+              </span>
             </div>
 
             {deal &&
+              !readOnly &&
               (confirmDelete ? (
                 <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs">
                   <span className="text-red-300">{t("deletePrompt")}</span>

@@ -30,7 +30,27 @@ interface StepLike {
   branches?: { yes?: StepLike[]; no?: StepLike[] }
 }
 
-export function validateStepsForActivation(steps: StepLike[]): ValidationIssue[] {
+/** The bits of a `message_templates` row activation checks need. */
+export interface TemplateBody {
+  name: string
+  language: string | null
+  body_text: string
+}
+
+export interface ActivationContext {
+  /**
+   * The account's templates referenced by send_template steps. When a
+   * step's template is found here, every {{n}} in its body must have a
+   * value in `step_config.variables`. Omitted (or no match): skipped,
+   * since the engine still sends a template it has no local copy of.
+   */
+  templates?: TemplateBody[]
+}
+
+export function validateStepsForActivation(
+  steps: StepLike[],
+  ctx: ActivationContext = {},
+): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   if (!Array.isArray(steps) || steps.length === 0) {
     issues.push({
@@ -39,22 +59,130 @@ export function validateStepsForActivation(steps: StepLike[]): ValidationIssue[]
     })
     return issues
   }
-  walk(steps, '', issues)
+  walk(steps, '', issues, ctx)
   return issues
 }
 
-function walk(steps: StepLike[], prefix: string, issues: ValidationIssue[]): void {
+/** Template names used by send_template steps anywhere in the tree. */
+export function templateNamesInSteps(steps: StepLike[]): string[] {
+  const names = new Set<string>()
+  const visit = (list: StepLike[] | undefined) => {
+    if (!Array.isArray(list)) return
+    for (const s of list) {
+      const name = s.step_config?.template_name
+      if (s.step_type === 'send_template' && nonEmpty(name)) names.add(String(name))
+      visit(s.branches?.yes)
+      visit(s.branches?.no)
+    }
+  }
+  visit(steps)
+  return [...names]
+}
+
+/**
+ * Positional body placeholders a template needs, as the `variables`
+ * keys the engine sends in order: "Hi {{1}}, {{2}}" → ["1", "2"].
+ */
+export function templateVariableKeys(bodyText: string): string[] {
+  const seen = new Set<number>()
+  for (const m of bodyText.matchAll(/\{\{\s*(\d+)\s*\}\}/g)) {
+    const n = Number(m[1])
+    if (n >= 1) seen.add(n)
+  }
+  return [...seen].sort((a, b) => a - b).map(String)
+}
+
+/**
+ * The template a send_template step will use, by name + language,
+ * tolerant of the en / en_US split (same order as the send path's
+ * pickTemplateRow: exact, then same base language, then en_US / en).
+ */
+export function findTemplateBody(
+  templates: TemplateBody[],
+  name: string,
+  language: string | null | undefined,
+): TemplateBody | undefined {
+  const rows = templates.filter((tpl) => tpl.name === name)
+  if (rows.length === 0) return undefined
+  const base = (l: string) => l.toLowerCase().split(/[_-]/)[0]
+  if (language) {
+    const wanted = language.toLowerCase()
+    return (
+      rows.find((r) => r.language?.toLowerCase() === wanted) ??
+      rows.find((r) => r.language && base(r.language) === base(language))
+    )
+  }
+  return rows.find((r) => r.language === 'en_US') ?? rows.find((r) => r.language === 'en') ?? rows[0]
+}
+
+function walk(steps: StepLike[], prefix: string, issues: ValidationIssue[], ctx: ActivationContext): void {
   steps.forEach((s, i) => {
     const path = `${prefix}steps[${i}]`
-    validateOne(s, path, issues)
+    validateOne(s, path, issues, ctx)
     if (s.step_type === 'condition' && s.branches) {
-      if (s.branches.yes) walk(s.branches.yes, `${path}.yes.`, issues)
-      if (s.branches.no) walk(s.branches.no, `${path}.no.`, issues)
+      if (s.branches.yes) walk(s.branches.yes, `${path}.yes.`, issues, ctx)
+      if (s.branches.no) walk(s.branches.no, `${path}.no.`, issues, ctx)
     }
   })
 }
 
-function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): void {
+/** "HH:mm-HH:mm" (minutes optional, 24:00 allowed as an end of day). */
+const TIME_WINDOW_RE = /^\s*(\d{1,2})(?::(\d{2}))?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*$/
+
+function isTimeWindow(v: unknown): boolean {
+  const m = typeof v === 'string' ? TIME_WINDOW_RE.exec(v) : null
+  if (!m) return false
+  const ok = (h: string, min: string | undefined) => {
+    const hh = Number(h)
+    const mm = Number(min ?? 0)
+    return mm < 60 && (hh < 24 || (hh === 24 && mm === 0))
+  }
+  return ok(m[1], m[2]) && ok(m[3], m[4])
+}
+
+/**
+ * Each subject reads different fields at run time (engine.ts,
+ * evaluateCondition), so each requires different ones here.
+ */
+function validateCondition(c: Record<string, unknown>, path: string, issues: ValidationIssue[]): void {
+  if (!nonEmpty(c.subject)) {
+    issues.push({ path: `${path}.subject`, message: t('conditionSubjectRequired') })
+    if (!nonEmpty(c.operand)) {
+      issues.push({ path: `${path}.operand`, message: t('conditionOperandRequired') })
+    }
+    return
+  }
+  switch (c.subject) {
+    case 'tag_presence':
+    case 'contact_field':
+      // The tag id / the contact column. contact_field's `value` may be
+      // empty: it then matches a field that is empty.
+      if (!nonEmpty(c.operand)) {
+        issues.push({ path: `${path}.operand`, message: t('conditionOperandRequired') })
+      }
+      break
+    case 'message_content':
+      // Only `value` is read: an empty one would match every message.
+      if (!nonEmpty(c.value)) {
+        issues.push({ path: `${path}.value`, message: t('conditionValueRequired') })
+      }
+      break
+    case 'time_of_day':
+      if (!nonEmpty(c.operand)) {
+        issues.push({ path: `${path}.operand`, message: t('conditionOperandRequired') })
+      } else if (!isTimeWindow(c.operand)) {
+        issues.push({ path: `${path}.operand`, message: t('conditionTimeInvalid') })
+      }
+      break
+    default:
+      issues.push({
+        path: `${path}.subject`,
+        message: t('conditionSubjectInvalid'),
+      })
+  }
+}
+
+function validateOne(step: StepLike, path: string, issues: ValidationIssue[], ctx: ActivationContext): void {
   const c = step.step_config ?? {}
   switch (step.step_type) {
     case 'send_message':
@@ -75,6 +203,21 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
     case 'send_template':
       if (!nonEmpty(c.template_name)) {
         issues.push({ path: `${path}.template_name`, message: t('templateNameRequired') })
+        break
+      }
+      {
+        const tpl = ctx.templates
+          ? findTemplateBody(ctx.templates, String(c.template_name), c.language as string | undefined)
+          : undefined
+        const vars = (c.variables ?? {}) as Record<string, unknown>
+        for (const key of tpl ? templateVariableKeys(tpl.body_text) : []) {
+          if (!nonEmpty(vars[key])) {
+            issues.push({
+              path: `${path}.variables.${key}`,
+              message: t('templateVariableRequired', { placeholder: `{{${key}}}` }),
+            })
+          }
+        }
       }
       break
     case 'add_tag':
@@ -122,12 +265,7 @@ function validateOne(step: StepLike, path: string, issues: ValidationIssue[]): v
       }
       break
     case 'condition':
-      if (!nonEmpty(c.subject)) {
-        issues.push({ path: `${path}.subject`, message: t('conditionSubjectRequired') })
-      }
-      if (!nonEmpty(c.operand)) {
-        issues.push({ path: `${path}.operand`, message: t('conditionOperandRequired') })
-      }
+      validateCondition(c, path, issues)
       break
     case 'send_webhook':
       if (!nonEmpty(c.url)) {

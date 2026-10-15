@@ -232,6 +232,7 @@ export interface Broadcasts {
    */
   delivery_locked_at: string | null;
   failed_count: Generated<number | null>;
+  header_media_url: string | null;
   id: Generated<string>;
   name: string;
   read_count: Generated<number | null>;

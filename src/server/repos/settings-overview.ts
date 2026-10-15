@@ -11,15 +11,10 @@ export interface SettingsOverviewCounts {
 }
 
 /**
- * Templates and tags are counted for rows the caller authored
- * (`user_id`), custom fields for the whole account — the same numbers
- * the overview tiles have always shown.
+ * Workspace-wide counts: every member sees the same numbers as the
+ * Templates / Fields & tags pages, whoever created the rows.
  */
-export async function getSettingsOverviewCounts(
-  db: Db,
-  accountId: string,
-  userId: string,
-): Promise<SettingsOverviewCounts> {
+export async function getSettingsOverviewCounts(db: Db, accountId: string): Promise<SettingsOverviewCounts> {
   const [templates, tags, fields, wa] = await Promise.all([
     db
       .selectFrom("message_templates")
@@ -28,13 +23,11 @@ export async function getSettingsOverviewCounts(
         eb.fn.countAll<string>().filterWhere("status", "=", "PENDING").as("pending"),
       ])
       .where("account_id", "=", accountId)
-      .where("user_id", "=", userId)
       .executeTakeFirstOrThrow(),
     db
       .selectFrom("tags")
       .select((eb) => eb.fn.countAll<string>().as("n"))
       .where("account_id", "=", accountId)
-      .where("user_id", "=", userId)
       .executeTakeFirstOrThrow(),
     db
       .selectFrom("custom_fields")

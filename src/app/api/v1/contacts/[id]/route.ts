@@ -17,6 +17,7 @@ import {
   ContactError,
 } from '@/lib/api/v1/contacts';
 import { asService, serviceRunner, sql } from '@/server/db';
+import { isUuid } from '@/server/http';
 
 export async function GET(
   request: Request,
@@ -25,6 +26,7 @@ export async function GET(
   try {
     const ctx = await requireApiKey(request, 'contacts:read');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Contact not found', 404);
     const contact = await asService((db) => getContactById(db, ctx.accountId, id));
     if (!contact) return fail('not_found', 'Contact not found', 404);
     return ok(contact);
@@ -40,6 +42,7 @@ export async function PATCH(
   try {
     const ctx = await requireApiKey(request, 'contacts:write');
     const { id } = await params;
+    if (!isUuid(id)) return fail('not_found', 'Contact not found', 404);
 
     const body = (await request.json().catch(() => null)) as Record<
       string,

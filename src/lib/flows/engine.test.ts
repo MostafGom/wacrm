@@ -47,7 +47,8 @@ import type {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
 } from "./meta-send";
-import type { ParsedInbound } from "./types";
+import type { KeywordTriggerConfig, ParsedInbound } from "./types";
+import { getFlowTemplate } from "./templates";
 import { flowFakes, resetFlowFakes } from "./engine-test-fakes";
 
 const fakes = flowFakes.state;
@@ -184,6 +185,28 @@ describe("matchesKeywordTrigger", () => {
     const cfg = { keywords: ["", "support", ""] };
     expect(matchesKeywordTrigger("support center", cfg)).toBe(true);
     expect(matchesKeywordTrigger("nope", cfg)).toBe(false);
+  });
+
+  it("match_type='word' only fires on whole words", () => {
+    const cfg = { keywords: ["hi", "help"], match_type: "word" as const };
+    expect(matchesKeywordTrigger("Hi there", cfg)).toBe(true);
+    expect(matchesKeywordTrigger("say hi!", cfg)).toBe(true);
+    expect(matchesKeywordTrigger("Do you ship to Berlin?", cfg)).toBe(false);
+    expect(matchesKeywordTrigger("This is broken", cfg)).toBe(false);
+    expect(matchesKeywordTrigger("helpful", cfg)).toBe(false);
+  });
+
+  it("starter templates with short keywords match whole words only", () => {
+    for (const slug of ["welcome_menu", "faq_bot", "lead_capture"]) {
+      const tpl = getFlowTemplate(slug)!;
+      if (tpl.trigger_type !== "keyword") continue;
+      const cfg = tpl.trigger_config as KeywordTriggerConfig;
+      expect(cfg.match_type, slug).toBe("word");
+      expect(matchesKeywordTrigger(cfg.keywords[0], cfg), slug).toBe(true);
+    }
+    const welcome = getFlowTemplate("welcome_menu")!.trigger_config as KeywordTriggerConfig;
+    expect(matchesKeywordTrigger("Do you ship to Berlin?", welcome)).toBe(false);
+    expect(matchesKeywordTrigger("This is the damaged item", welcome)).toBe(false);
   });
 });
 
@@ -466,6 +489,38 @@ function dispatch(message: ParsedInbound) {
 function text(t: string): ParsedInbound {
   return { kind: "text", text: t, meta_message_id: `m-${t}` };
 }
+
+describe("handoff note interpolates {{vars.*}}", () => {
+  beforeEach(() => {
+    resetFlowFakes();
+    fakes.activeRuns = [{ ...RUN, vars: { company: "Acme Ltd" } }];
+    fakes.flows = [FLOW];
+    fakes.nodes = [
+      {
+        id: "n1",
+        flow_id: "flow-1",
+        node_key: "ask_name",
+        node_type: "collect_input",
+        config: { prompt_text: "What's your name?", var_key: "name", next_node_key: "to_sales" },
+      },
+      {
+        id: "n2",
+        flow_id: "flow-1",
+        node_key: "to_sales",
+        node_type: "handoff",
+        config: { note: "New lead — name={{vars.name}}, company={{vars.company}}" },
+      },
+    ];
+  });
+
+  it("logs the note with the captured answers filled in", async () => {
+    await dispatch(text("Bea"));
+    const ev = fakes.events.find((e) => (e as { event_type?: string }).event_type === "handoff") as
+      | { payload: { note: string } }
+      | undefined;
+    expect(ev?.payload.note).toBe("New lead — name=Bea, company=Acme Ltd");
+  });
+});
 
 describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
   beforeEach(() => {

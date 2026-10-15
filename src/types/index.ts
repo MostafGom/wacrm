@@ -435,6 +435,8 @@ export interface Broadcast {
    * send. Added in migration 038.
    */
   delivery_locked_at?: string | null;
+  /** Media sent in a media-header template's header (migration 049). */
+  header_media_url?: string | null;
   created_at: string;
 }
 

@@ -238,6 +238,21 @@ export async function listAutomationLogs(
 // ---- builder resources ------------------------------------------------
 
 /** Pickers the automation builder needs, in one round trip per table. */
+/**
+ * name / language / body of the account's templates with these names,
+ * for activation validation of send_template steps (their {{n}}
+ * placeholders). Any status: the send path matches rows by name too.
+ */
+export async function listTemplateBodies(db: Db, accountId: string, names: string[]) {
+  if (names.length === 0) return [];
+  return db
+    .selectFrom("message_templates")
+    .select(["name", "language", "body_text"])
+    .where("account_id", "=", accountId)
+    .where("name", "in", names)
+    .execute();
+}
+
 export async function getBuilderResources(db: Db, accountId: string) {
   const [templates, pipelines, stages] = await Promise.all([
     // Only APPROVED templates can actually be sent (anything else 400s

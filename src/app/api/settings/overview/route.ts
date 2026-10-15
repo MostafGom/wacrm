@@ -11,7 +11,7 @@ import { getSettingsOverviewCounts } from '@/server/repos/settings-overview'
 export async function GET() {
   try {
     const ctx = await requireRole('viewer')
-    const counts = await asUser(ctx.userId, (db) => getSettingsOverviewCounts(db, ctx.accountId, ctx.userId))
+    const counts = await asUser(ctx.userId, (db) => getSettingsOverviewCounts(db, ctx.accountId))
     return NextResponse.json(counts)
   } catch (err) {
     return toErrorResponse(err)

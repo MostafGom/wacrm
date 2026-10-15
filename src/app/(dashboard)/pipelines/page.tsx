@@ -59,6 +59,8 @@ export default function PipelinesPage() {
   const canEditSettings = useCan("edit-settings");
   const canCreateDeals = useCan("send-messages");
   const { accountId } = useAuth();
+  // Seeding the default pipeline is a pipeline write (admin+).
+  const canSeed = canEditSettings;
 
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [selectedPipelineId, setSelectedPipelineId] = useState<string>("");
@@ -131,7 +133,13 @@ export default function PipelinesPage() {
       setLoading(true);
       let list = await loadPipelines();
 
-      if (list.length === 0 && !seedAttempted.current) {
+      // Only latch the guard once a seed can actually run: on a hard
+      // load this effect first fires before useAuth has resolved the
+      // account, and latching then would skip the seed for good. The
+      // effect re-runs when accountId / role arrive (they feed
+      // seedDefaultPipeline / canSeed). Pipeline writes are admin+ on
+      // the server, so agents and viewers never attempt the seed.
+      if (list.length === 0 && canSeed && accountId && !seedAttempted.current) {
         seedAttempted.current = true;
         const seeded = await seedDefaultPipeline();
         if (seeded) list = await loadPipelines();
@@ -151,7 +159,7 @@ export default function PipelinesPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadPipelines, seedDefaultPipeline]);
+  }, [loadPipelines, seedDefaultPipeline, canSeed, accountId]);
 
   // Load stages + deals whenever selected pipeline changes.
   // Clearing on no-selection is a legitimate sync with URL/prop
@@ -314,8 +322,10 @@ export default function PipelinesPage() {
                   {p.name}
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuSeparator className="bg-border" />
-              {selectedPipeline && (
+              {selectedPipeline && canEditSettings && (
+                <DropdownMenuSeparator className="bg-border" />
+              )}
+              {selectedPipeline && canEditSettings && (
                 <DropdownMenuItem
                   onClick={() => setSettingsOpen(true)}
                   className="text-popover-foreground"
@@ -381,6 +391,7 @@ export default function PipelinesPage() {
             onDealMoved={handleDealMoved}
             onAddDeal={handleAddDeal}
             onEditDeal={handleEditDeal}
+            canEditDeals={canCreateDeals}
           />
         </>
       )}
@@ -426,7 +437,7 @@ export default function PipelinesPage() {
       </Dialog>
 
       {/* Pipeline Settings */}
-      {selectedPipeline && (
+      {selectedPipeline && canEditSettings && (
         <PipelineSettings
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
@@ -450,6 +461,7 @@ export default function PipelinesPage() {
         stages={stages}
         defaultStageId={defaultStageId}
         onSaved={refreshDeals}
+        canEdit={canCreateDeals}
       />
     </div>
   );

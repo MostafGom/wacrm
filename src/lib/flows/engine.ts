@@ -80,6 +80,7 @@ import {
   type StartNodeConfig,
   type KeywordTriggerConfig,
 } from "./types";
+import { matchesWholeWord } from "@/lib/keyword-match";
 
 // ============================================================
 // Pure helpers — extracted so engine.test.ts can exercise them
@@ -111,7 +112,7 @@ export function matchReplyId(
 }
 
 /**
- * Case-insensitive contains/exact match against a list of keywords.
+ * Case-insensitive contains/exact/whole-word match against a list of keywords.
  * Used by the trigger evaluator. Stable enough that the v3 builder
  * UI can preview matches by passing canned strings.
  */
@@ -125,6 +126,10 @@ export function matchesKeywordTrigger(
   for (const raw of cfg.keywords) {
     if (!raw) continue;
     const needle = cfg.case_sensitive ? raw : raw.toLowerCase();
+    if (matchType === "word") {
+      if (matchesWholeWord(text, raw, cfg.case_sensitive)) return true;
+      continue;
+    }
     if (matchType === "exact" ? haystack === needle : haystack.includes(needle)) {
       return true;
     }
@@ -436,7 +441,9 @@ async function executeHandoff(
     await handoff(run, run.conversation_id, cfg.assign_to);
   }
   await logEvent(run.id, "handoff", node.node_key, {
-    note: cfg.note ?? null,
+    // Same {{vars.*}} interpolation as the message nodes, so a lead
+    // capture's note carries the answers it collected.
+    note: cfg.note ? interpolateVars(cfg.note, run.vars) : null,
     assigned_to: cfg.assign_to ?? null,
   });
   await endRun(run, "handed_off", "handoff_node");

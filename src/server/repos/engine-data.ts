@@ -307,15 +307,59 @@ export async function findMessageIdByWaId(db: Db, accountId: string, waMessageId
 
 // ---- misc -----------------------------------------------------------
 
-/** Any member of the account (the automation "round robin" placeholder). */
-export async function firstAccountMemberUserId(db: Db, accountId: string): Promise<string | null> {
-  const row = await db
+/** Roles that take conversations, and so join a round-robin rotation. */
+const ROUND_ROBIN_ROLES = ["owner", "admin", "agent"] as const;
+
+/** step_config key holding a round-robin step's last pick. */
+export const ROUND_ROBIN_CURSOR_KEY = "round_robin_last_user_id";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Next assignee for a round-robin `assign_conversation` step: the
+ * account's members who take conversations (agent and up; viewers
+ * can't reply), in user_id order, starting after the member this step
+ * picked last and wrapping around. The cursor lives in the step's own
+ * step_config, so each step rotates independently.
+ *
+ * The step row is locked (FOR UPDATE) for the rest of the caller's
+ * transaction, so concurrent runs of the same step queue up and each
+ * sees the previous pick. A step outside the account is never read or
+ * written; the pick then just starts from the first member.
+ */
+export async function nextRoundRobinAssignee(db: Db, accountId: string, stepId: string): Promise<string | null> {
+  const step = await db
+    .selectFrom("automation_steps")
+    .innerJoin("automations", "automations.id", "automation_steps.automation_id")
+    .select(sql<string | null>`automation_steps.step_config ->> ${ROUND_ROBIN_CURSOR_KEY}`.as("last"))
+    .where("automation_steps.id", "=", stepId)
+    .where("automations.account_id", "=", accountId)
+    .forUpdate("automation_steps")
+    .executeTakeFirst();
+  const last = step?.last && UUID_RE.test(step.last) ? step.last : null;
+
+  const next = await db
     .selectFrom("profiles")
     .select("user_id")
     .where("account_id", "=", accountId)
+    .where("account_role", "in", ROUND_ROBIN_ROLES)
+    // Members after the cursor first (in order), then wrap to the start.
+    .orderBy(sql`coalesce(user_id > ${last}::uuid, false)`, "desc")
+    .orderBy("user_id")
     .limit(1)
     .executeTakeFirst();
-  return row?.user_id ?? null;
+  if (!next) return null;
+
+  if (step) {
+    await db
+      .updateTable("automation_steps")
+      .set({
+        step_config: sql<Json>`step_config || jsonb_build_object(${ROUND_ROBIN_CURSOR_KEY}::text, ${next.user_id}::text)`,
+      })
+      .where("id", "=", stepId)
+      .execute();
+  }
+  return next.user_id;
 }
 
 export async function getAccountDefaultCurrency(db: Db, accountId: string): Promise<string | null> {

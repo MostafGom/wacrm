@@ -108,6 +108,25 @@ describe('POST /api/broadcasts', () => {
     })
   })
 
+  it('stores the header media URL so a server-side resume can resend it', async () => {
+    audienceRepo.resolveAudienceContacts.mockResolvedValue([{ id: 'c1', name: 'Ann', phone: '+15550001' }])
+    audienceRepo.customValueIndex.mockResolvedValue(new Map())
+    repo.insertBroadcast.mockResolvedValue({ id: BROADCAST_ID, status: 'sending' })
+    repo.insertPendingRecipients.mockResolvedValue([])
+
+    const res = await post({ ...SEND_BODY, header_media_url: ' https://cdn.example.com/promo.png ' })
+    expect(res.status).toBe(201)
+    expect(repo.insertBroadcast.mock.calls[0][1]).toMatchObject({
+      header_media_url: 'https://cdn.example.com/promo.png',
+    })
+  })
+
+  it('rejects a header media URL that is not http(s)', async () => {
+    const res = await post({ ...SEND_BODY, header_media_url: 'javascript:alert(1)' })
+    expect(res.status).toBe(400)
+    expect(repo.insertBroadcast).not.toHaveBeenCalled()
+  })
+
   it('rejects a malformed audience', async () => {
     const res = await post({ ...SEND_BODY, audience: { type: 'everyone' } })
     expect(res.status).toBe(400)
