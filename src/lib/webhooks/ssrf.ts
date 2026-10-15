@@ -211,6 +211,17 @@ function normalizedHostSet(hosts: Iterable<string> | undefined): Set<string> {
 }
 
 /**
+ * Hosts an operator explicitly allows outbound customer webhooks and
+ * automation webhook steps to reach even though they are private —
+ * `WEBHOOK_ALLOWED_PRIVATE_HOSTS` (comma-separated exact hostnames/IPs).
+ * Meant for local end-to-end testing (the fake receiver in
+ * docker-compose.e2e.yml); unset in production. Read per call.
+ */
+export function webhookAllowedPrivateHosts(): Set<string> {
+  return normalizedHostSet((process.env.WEBHOOK_ALLOWED_PRIVATE_HOSTS ?? '').split(','))
+}
+
+/**
  * True if `rawUrl`'s host resolves only to publicly-routable
  * address(es), unless the exact hostname/IP is explicitly allow-listed
  * by the server operator. Returns false for a malformed URL, an obvious

@@ -11,7 +11,10 @@ import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
 
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
+// OPENAI_BASE_URL: local end-to-end testing only (fake provider in
+// docker-compose.e2e.yml). Read per call so tests can override it.
+const openaiUrl = () =>
+  `${(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '')}/chat/completions`
 
 interface OpenAiResponse {
   choices?: { message?: { content?: string } }[]
@@ -32,7 +35,7 @@ export async function generateOpenAi(args: ProviderArgs): Promise<ProviderResult
 
   let res: Response
   try {
-    res = await fetch(OPENAI_URL, {
+    res = await fetch(openaiUrl(), {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,

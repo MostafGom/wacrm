@@ -7,6 +7,7 @@
 // ============================================================
 
 import { randomBytes } from 'node:crypto';
+import { webhookAllowedPrivateHosts } from './ssrf';
 
 /** Secret prefix — self-identifying, like `wacrm_live_` for keys. */
 export const WEBHOOK_SECRET_PREFIX = 'whsec_';
@@ -47,14 +48,18 @@ export function serializeWebhookEndpoint(
 /**
  * Validate a webhook target URL: must be a well-formed absolute
  * `https://` URL (an unencrypted `http://` sink would leak signed
- * event payloads). Returns the normalized string or null.
+ * event payloads). Returns the normalized string or null. `http://` is
+ * accepted only for hosts in WEBHOOK_ALLOWED_PRIVATE_HOSTS (local
+ * end-to-end testing).
  */
 export function normalizeWebhookUrl(input: unknown): string | null {
   if (typeof input !== 'string') return null;
   const trimmed = input.trim();
   try {
     const u = new URL(trimmed);
-    if (u.protocol !== 'https:') return null;
+    const allowedHttp =
+      u.protocol === 'http:' && webhookAllowedPrivateHosts().has(u.hostname.toLowerCase());
+    if (u.protocol !== 'https:' && !allowedHttp) return null;
     return u.toString();
   } catch {
     return null;

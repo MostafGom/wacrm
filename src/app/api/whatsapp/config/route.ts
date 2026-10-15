@@ -32,8 +32,10 @@ import {
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import { resolveVerifyTokenForSave } from '@/lib/whatsapp/verify-token'
 import { getT } from '@/lib/i18n/translate'
+import { hasMinRole, isAccountRole } from '@/lib/auth/roles'
 
 const t = getT('Api')
+const tAuth = getT('LibErrors.auth')
 
 /**
  * Resolve the caller's account_id from their profile. Inlined here
@@ -46,12 +48,38 @@ const t = getT('Api')
  * should treat that the same as "not connected".
  */
 async function resolveAccountId(userId: string): Promise<string | null> {
+  return (await resolveMembership(userId))?.accountId ?? null
+}
+
+async function resolveMembership(
+  userId: string,
+): Promise<{ accountId: string; role: string | null } | null> {
   try {
     const profile = await asUser(userId, (db) => getProfileByUserId(db, userId))
-    return profile?.account_id ?? null
+    return profile?.account_id ? { accountId: profile.account_id, role: profile.account_role } : null
   } catch {
     return null
   }
+}
+
+/**
+ * Connecting / replacing / disconnecting the number is an admin action.
+ * The check has to happen here, before any Meta call: RLS on
+ * whatsapp_config would only reject the final write, after the number
+ * had already been registered / the WABA subscribed — and a non-admin
+ * DELETE would silently match zero rows yet answer `success: true`.
+ */
+async function requireAdminAccount(
+  userId: string,
+): Promise<{ accountId: string } | NextResponse> {
+  const membership = await resolveMembership(userId)
+  if (!membership) {
+    return NextResponse.json({ error: t('common.profileNotLinked') }, { status: 403 })
+  }
+  if (!isAccountRole(membership.role) || !hasMinRole(membership.role, 'admin')) {
+    return NextResponse.json({ error: tAuth('requiresRole', { min: tAuth('roleNames.admin') }) }, { status: 403 })
+  }
+  return { accountId: membership.accountId }
 }
 
 
@@ -238,13 +266,9 @@ export async function POST(request: Request) {
     }
     const user = session.user
 
-    const accountId = await resolveAccountId(user.id)
-    if (!accountId) {
-      return NextResponse.json(
-        { error: t('common.profileNotLinked') },
-        { status: 403 },
-      )
-    }
+    const admin = await requireAdminAccount(user.id)
+    if (admin instanceof NextResponse) return admin
+    const { accountId } = admin
 
     const body = await request.json()
     const { phone_number_id, waba_id, access_token, verify_token, pin } = body
@@ -569,13 +593,9 @@ export async function DELETE() {
     }
     const user = session.user
 
-    const accountId = await resolveAccountId(user.id)
-    if (!accountId) {
-      return NextResponse.json(
-        { error: t('common.profileNotLinked') },
-        { status: 403 },
-      )
-    }
+    const admin = await requireAdminAccount(user.id)
+    if (admin instanceof NextResponse) return admin
+    const { accountId } = admin
 
     try {
       await asUser(user.id, (db) => deleteWhatsAppConfig(db, accountId))

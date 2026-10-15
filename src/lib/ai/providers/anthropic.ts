@@ -11,7 +11,10 @@ import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
+// ANTHROPIC_BASE_URL: local end-to-end testing only (fake provider in
+// docker-compose.e2e.yml). Read per call so tests can override it.
+const anthropicUrl = () =>
+  `${(process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1').replace(/\/+$/, '')}/messages`
 const ANTHROPIC_VERSION = '2023-06-01'
 
 interface AnthropicResponse {
@@ -47,7 +50,7 @@ export async function generateAnthropic(args: ProviderArgs): Promise<ProviderRes
 
   let res: Response
   try {
-    res = await fetch(ANTHROPIC_URL, {
+    res = await fetch(anthropicUrl(), {
       method: 'POST',
       headers: {
         'x-api-key': apiKey,

@@ -8,6 +8,7 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
 // Control the SSRF guard per-test.
 vi.mock('@/lib/webhooks/ssrf', () => ({
   isDeliverableUrl: vi.fn(async () => true),
+  webhookAllowedPrivateHosts: () => new Set<string>(),
 }));
 
 // Repository calls run through asService; the repo module is mocked.

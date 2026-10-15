@@ -15,7 +15,17 @@ import { getT } from '@/lib/i18n/translate'
 const ti = getT('Validation.interactive')
 
 const META_API_VERSION = 'v21.0'
-const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const META_API_DEFAULT_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+
+/**
+ * Graph API base URL. `META_GRAPH_BASE_URL` exists for local end-to-end
+ * testing only (it points the app at the fake Meta service in
+ * docker-compose.e2e.yml); unset in production. Read per call so tests
+ * can override it.
+ */
+export function metaApiBase(): string {
+  return (process.env.META_GRAPH_BASE_URL || META_API_DEFAULT_BASE).replace(/\/+$/, '')
+}
 
 export interface MetaSendResult {
   messageId: string
@@ -126,7 +136,7 @@ export async function verifyPhoneNumber(
   args: VerifyPhoneNumberArgs
 ): Promise<MetaPhoneInfo> {
   const { phoneNumberId, accessToken } = args
-  const url = `${META_API_BASE}/${phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating`
+  const url = `${metaApiBase()}/${phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating`
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
@@ -195,7 +205,7 @@ export async function registerPhoneNumber(
   args: RegisterPhoneNumberArgs
 ): Promise<RegisterPhoneNumberResult> {
   const { phoneNumberId, accessToken, pin } = args
-  const url = `${META_API_BASE}/${phoneNumberId}/register`
+  const url = `${metaApiBase()}/${phoneNumberId}/register`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -233,7 +243,7 @@ export async function subscribeWabaToApp(
   args: SubscribeWabaToAppArgs
 ): Promise<void> {
   const { wabaId, accessToken } = args
-  const url = `${META_API_BASE}/${wabaId}/subscribed_apps`
+  const url = `${metaApiBase()}/${wabaId}/subscribed_apps`
   const response = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -270,7 +280,7 @@ export async function listWabaPhoneNumbers(
   const { wabaId, accessToken } = args
   const out: WabaPhoneNumber[] = []
   let url: string | undefined =
-    `${META_API_BASE}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name&limit=100`
+    `${metaApiBase()}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name&limit=100`
   for (let page = 0; url && page < 5; page++) {
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -310,7 +320,7 @@ export async function getSubscribedApps(
   args: GetSubscribedAppsArgs
 ): Promise<SubscribedApp[]> {
   const { wabaId, accessToken } = args
-  const url = `${META_API_BASE}/${wabaId}/subscribed_apps`
+  const url = `${metaApiBase()}/${wabaId}/subscribed_apps`
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
@@ -361,7 +371,7 @@ export async function sendTextMessage(
   args: SendTextMessageArgs
 ): Promise<MetaSendResult> {
   const { phoneNumberId, accessToken, to, text, contextMessageId } = args
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
   const body: Record<string, unknown> = {
     messaging_product: 'whatsapp',
     ...recipientFields(to),
@@ -419,7 +429,7 @@ export async function sendMediaMessage(
 ): Promise<MetaSendResult> {
   const { phoneNumberId, accessToken, to, kind, link, caption, filename, contextMessageId } = args
   if (!link) throw new Error('sendMediaMessage requires a link.')
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
 
   // Audio accepts neither caption nor filename per Meta's spec — adding
   // either yields a 400. image/video/document accept a caption; only
@@ -513,7 +523,7 @@ export async function sendTemplateMessage(
     messageParams,
     contextMessageId,
   } = args
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
 
   const templatePayload: Record<string, unknown> = {
     name: templateName,
@@ -612,7 +622,7 @@ export async function uploadResumableMedia(
     access_token: accessToken,
   })
   const startRes = await fetch(
-    `${META_API_BASE}/${appId}/uploads?${startParams.toString()}`,
+    `${metaApiBase()}/${appId}/uploads?${startParams.toString()}`,
     { method: 'POST' },
   )
   if (!startRes.ok) {
@@ -625,7 +635,7 @@ export async function uploadResumableMedia(
 
   // Step 2 — upload the bytes. Note the `OAuth` auth scheme (not Bearer)
   // and the file_offset header, both required by this endpoint.
-  const uploadRes = await fetch(`${META_API_BASE}/${startData.id}`, {
+  const uploadRes = await fetch(`${metaApiBase()}/${startData.id}`, {
     method: 'POST',
     headers: {
       Authorization: `OAuth ${accessToken}`,
@@ -680,7 +690,7 @@ export async function submitMessageTemplate(
   args: SubmitMessageTemplateArgs
 ): Promise<SubmitMessageTemplateResult> {
   const { wabaId, accessToken, payload } = args
-  const url = `${META_API_BASE}/${wabaId}/message_templates`
+  const url = `${metaApiBase()}/${wabaId}/message_templates`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -733,7 +743,7 @@ export async function editMessageTemplate(
   const { metaTemplateId, accessToken, components, category } = args
   const body: Record<string, unknown> = { components }
   if (category) body.category = category
-  const response = await fetch(`${META_API_BASE}/${metaTemplateId}`, {
+  const response = await fetch(`${metaApiBase()}/${metaTemplateId}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -771,7 +781,7 @@ export async function deleteMessageTemplate(
   const { wabaId, accessToken, name, metaTemplateId } = args
   const params = new URLSearchParams({ name })
   if (metaTemplateId) params.set('hsm_id', metaTemplateId)
-  const url = `${META_API_BASE}/${wabaId}/message_templates?${params.toString()}`
+  const url = `${metaApiBase()}/${wabaId}/message_templates?${params.toString()}`
   const response = await fetch(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -806,7 +816,7 @@ export async function sendReactionMessage(
   args: SendReactionMessageArgs
 ): Promise<MetaSendResult> {
   const { phoneNumberId, accessToken, to, targetMessageId, emoji } = args
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -857,7 +867,7 @@ export async function sendTypingIndicator(
   args: SendTypingIndicatorArgs
 ): Promise<void> {
   const { phoneNumberId, accessToken, messageId } = args
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -989,7 +999,7 @@ export async function sendInteractiveButtons(
   }
   if (contextMessageId) body.context = { message_id: contextMessageId }
 
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -1120,7 +1130,7 @@ export async function sendInteractiveList(
   }
   if (contextMessageId) body.context = { message_id: contextMessageId }
 
-  const url = `${META_API_BASE}/${phoneNumberId}/messages`
+  const url = `${metaApiBase()}/${phoneNumberId}/messages`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -1184,7 +1194,7 @@ export async function getMediaUrl(
   args: GetMediaUrlArgs
 ): Promise<{ url: string; mimeType: string; fileSize: number | null }> {
   const { mediaId, accessToken } = args
-  const response = await fetch(`${META_API_BASE}/${mediaId}`, {
+  const response = await fetch(`${metaApiBase()}/${mediaId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
   if (!response.ok) {

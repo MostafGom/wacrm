@@ -30,7 +30,7 @@ import {
 
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { buildSignatureHeader } from '@/lib/webhooks/sign';
-import { isDeliverableUrl } from '@/lib/webhooks/ssrf';
+import { isDeliverableUrl, webhookAllowedPrivateHosts } from '@/lib/webhooks/ssrf';
 import type { WebhookEvent } from '@/lib/webhooks/events';
 
 /** Per-endpoint HTTP timeout. Kept short — this runs in `after()`. */
@@ -91,7 +91,7 @@ async function deliverOne(
   // SSRF guard: refuse to POST to a host that resolves to a private /
   // loopback / link-local address. Counts as a failure so a
   // misconfigured internal URL surfaces and eventually auto-disables.
-  if (!(await isDeliverableUrl(row.url))) {
+  if (!(await isDeliverableUrl(row.url, { allowPrivateHosts: webhookAllowedPrivateHosts() }))) {
     console.warn('[webhooks] refusing non-public delivery target for', row.id);
     await recordFailure(row);
     return;

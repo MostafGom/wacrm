@@ -58,7 +58,7 @@ import { addContactTagIfAbsent } from '@/lib/contacts/tag-write'
 import { MAX_TAG_CHAIN_DEPTH, getTagChainDepth } from '@/lib/contacts/tag-chain'
 import { engineSendText, engineSendTemplate, engineSendInteractive } from './meta-send'
 import { validateInteractivePayload } from '@/lib/whatsapp/interactive'
-import { isDeliverableUrl } from '@/lib/webhooks/ssrf'
+import { isDeliverableUrl, webhookAllowedPrivateHosts } from '@/lib/webhooks/ssrf'
 import { getT } from '@/lib/i18n/translate'
 
 /** Step errors land in automation_logs and are shown on the logs page. */
@@ -852,7 +852,7 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
       // server makes the request, so refuse any destination that resolves
       // to a private / loopback / link-local / reserved address. Mirrors
       // the webhook_endpoints delivery path (see lib/webhooks/deliver.ts).
-      if (!(await isDeliverableUrl(cfg.url))) {
+      if (!(await isDeliverableUrl(cfg.url, { allowPrivateHosts: webhookAllowedPrivateHosts() }))) {
         throw new Error(tErr('destinationNotAllowed'))
       }
       const body = cfg.body_template ? interpolate(cfg.body_template, args) : JSON.stringify(args.context)

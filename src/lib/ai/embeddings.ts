@@ -16,7 +16,9 @@ const t = getT('LibErrors')
 // migration 030.
 // ============================================================
 
-const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings'
+// Same OPENAI_BASE_URL switch as the chat provider (testing only).
+const openaiEmbeddingsUrl = () =>
+  `${(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '')}/embeddings`
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small'
 export const EMBEDDING_DIMENSIONS = 1536
@@ -54,7 +56,7 @@ export async function embedTexts(
 
     let res: Response
     try {
-      res = await fetch(OPENAI_EMBEDDINGS_URL, {
+      res = await fetch(openaiEmbeddingsUrl(), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
