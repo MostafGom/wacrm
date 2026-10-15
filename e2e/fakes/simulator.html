@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fake WhatsApp Simulator</title>
+<style>
+  :root {
+    --bg: #eae6df; --panel: #ffffff; --ink: #111b21; --muted: #667781; --line: #d1d7db;
+    --brand: #00a884; --bubble-in: #ffffff; --bubble-out: #d9fdd3; --chat: #efeae2; --warn: #c0392b;
+    --chip: #f0f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b141a; --panel: #111b21; --ink: #e9edef; --muted: #8696a0; --line: #2a3942;
+      --bubble-in: #202c33; --bubble-out: #005c4b; --chat: #0b141a; --chip: #202c33; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--brand); color: #fff; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .note { opacity: .85; font-size: 12px; }
+  .layout { display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; height: calc(100vh - 44px); }
+  @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; height: auto; } }
+  aside, main, section { background: var(--panel); border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
+  .list-item { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .list-item.active { background: var(--chip); }
+  .list-item .name { font-weight: 600; }
+  .list-item .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  form.add { display: grid; gap: 6px; padding: 12px; border-bottom: 1px solid var(--line); }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input, select, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+  button { padding: 7px 11px; border: 0; border-radius: 8px; background: var(--brand); color: #fff; cursor: pointer; }
+  button.ghost { background: var(--chip); color: var(--ink); }
+  button.small { padding: 3px 8px; font-size: 12px; }
+  main { display: flex; flex-direction: column; background: var(--chat); }
+  .chat-head { padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .messages { flex: 1; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .bubble { max-width: 70%; padding: 7px 10px 18px; border-radius: 8px; position: relative; box-shadow: 0 1px 0 rgba(0,0,0,.08); word-wrap: break-word; }
+  /* Customer's phone: what the customer sends is on the right. */
+  .bubble.in { align-self: flex-end; background: var(--bubble-out); }
+  .bubble.out { align-self: flex-start; background: var(--bubble-in); }
+  .bubble .meta { position: absolute; right: 8px; bottom: 3px; font-size: 11px; color: var(--muted); }
+  .bubble .tag { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+  .bubble img { max-width: 220px; border-radius: 6px; display: block; }
+  .bubble .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .bubble .tools { display: none; gap: 4px; margin-top: 6px; }
+  .bubble:hover .tools { display: flex; }
+  .reaction { position: absolute; bottom: -10px; left: 8px; background: var(--panel); border-radius: 10px; padding: 0 5px; font-size: 13px; }
+  .composer { display: flex; gap: 8px; padding: 10px; background: var(--panel); border-top: 1px solid var(--line); align-items: center; }
+  .composer input { flex: 1; }
+  .quote { margin: 0 10px; padding: 6px 10px; border-left: 3px solid var(--brand); background: var(--chip); font-size: 12px; display: flex; justify-content: space-between; }
+  .empty { color: var(--muted); text-align: center; margin: auto; padding: 32px; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  .tabs button { flex: 1; border-radius: 0; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--brand); border-bottom-color: var(--brand); }
+  .pane { padding: 12px; display: grid; gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .card pre { margin: 6px 0 0; white-space: pre-wrap; font-size: 11px; max-height: 160px; overflow: auto; }
+  .ok { color: var(--brand); } .bad { color: var(--warn); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  label.check { display: flex; gap: 8px; align-items: center; }
+  label.check input { width: auto; }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fake WhatsApp Simulator</h1>
+  <span class="note">You are the customer. Messages go to the app through a signed Meta webhook; replies show up here.</span>
+</header>
+<div class="layout">
+  <aside>
+    <form class="add" id="add-customer">
+      <strong>Add a fake customer</strong>
+      <input name="phone" placeholder="Phone with country code, e.g. +15550001003" required>
+      <input name="name" placeholder="Display name (optional)">
+      <button>Add customer</button>
+      <span class="hint">+15550000999 → delivery fails · +15550000998 → send rejected</span>
+    </form>
+    <div id="customers"></div>
+  </aside>
+
+  <main>
+    <div class="chat-head" id="chat-head"><span class="hint">Pick a customer</span></div>
+    <div class="messages" id="messages"><div class="empty">No customer selected.</div></div>
+    <div id="quote"></div>
+    <form class="composer" id="composer">
+      <button type="button" class="ghost" title="Send a photo" data-media="image">🖼️</button>
+      <button type="button" class="ghost" title="Send a PDF" data-media="document">📄</button>
+      <button type="button" class="ghost" title="Send a voice note" data-media="audio">🎤</button>
+      <button type="button" class="ghost" title="Share location" id="send-location">📍</button>
+      <input id="text" placeholder="Type a message as the customer" autocomplete="off">
+      <button>Send</button>
+    </form>
+  </main>
+
+  <section>
+    <div class="tabs">
+      <button class="on" data-tab="hooks">Webhooks</button>
+      <button data-tab="ai">AI log</button>
+      <button data-tab="templates">Templates</button>
+      <button data-tab="settings">Settings</button>
+    </div>
+    <div class="pane" id="pane"></div>
+  </section>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let data = null;
+let current = localStorage.getItem("sim.current") || null;
+let tab = "hooks";
+let quote = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const time = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const ticks = (s) => ({ accepted: "🕓", sent: "✓", delivered: "✓✓", read: "<span style='color:#53bdeb'>✓✓</span>", failed: "<span class='bad'>⚠ failed</span>" }[s] || "");
+
+async function api(path, body, method = "POST") {
+  const r = await fetch(path, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  return r.json().catch(() => ({}));
+}
+
+async function refresh() {
+  try {
+    data = await (await fetch("/__sim/state")).json();
+    render();
+  } catch {}
+}
+
+function inboundText(m) {
+  switch (m.type) {
+    case "text": return esc(m.text.body);
+    case "interactive": {
+      const r = m.interactive.button_reply || m.interactive.list_reply;
+      return `<span class="tag">tapped</span>${esc(r.title)} <span class="hint">(${esc(r.id)})</span>`;
+    }
+    case "button": return `<span class="tag">tapped template button</span>${esc(m.button.text)}`;
+    case "image": return `<img src="/media/${esc(m.image.id)}" alt="">${m.image.caption ? esc(m.image.caption) : ""}`;
+    case "document": return `📄 ${esc(m.document.filename)}${m.document.caption ? "<br>" + esc(m.document.caption) : ""}`;
+    case "audio": return "🎤 Voice note";
+    case "location": return `📍 ${esc(m.location.name || "")} (${m.location.latitude}, ${m.location.longitude})`;
+    case "reaction": return `<span class="tag">reacted</span>${esc(m.reaction.emoji || "(removed)")}`;
+    default: return esc(m.type);
+  }
+}
+
+function outboundHtml(m) {
+  const b = m.body || {};
+  const t = m.type;
+  if (t === "text") return esc(b.text?.body);
+  if (["image", "video", "document", "audio"].includes(t)) {
+    const media = b[t] || {};
+    const preview = t === "image" ? `<img src="${esc(media.link)}" alt="">` : `${{ video: "🎬", document: "📄", audio: "🎤" }[t]} <a href="${esc(media.link)}" target="_blank">${esc(media.filename || t)}</a>`;
+    return `${preview}${media.caption ? "<br>" + esc(media.caption) : ""}`;
+  }
+  if (t === "template") {
+    const tpl = b.template || {};
+    const params = (tpl.components || []).flatMap((c) => (c.parameters || []).map((p) => p.text || p.image?.link || p.document?.link || p.type));
+    const def = (data.templates || []).find((x) => x.name === tpl.name);
+    return `<span class="tag">template · ${esc(tpl.name)} (${esc(tpl.language?.code)})${def ? "" : " — not in fake WABA"}</span>` +
+      (params.length ? `Variables: ${params.map(esc).join(", ")}` : "<span class='hint'>no variables</span>") +
+      (/appointment_confirm/.test(tpl.name) ? `<div class="actions"><button class="small" data-tbtn="Yes">Yes</button><button class="small" data-tbtn="No">No</button></div>` : "");
+  }
+  if (t === "interactive") {
+    const i = b.interactive || {};
+    const head = i.header?.text ? `<strong>${esc(i.header.text)}</strong><br>` : "";
+    const foot = i.footer?.text ? `<br><span class="hint">${esc(i.footer.text)}</span>` : "";
+    if (i.type === "button") {
+      const btns = (i.action?.buttons || []).map((x) => `<button class="small" data-reply='${esc(JSON.stringify({ id: x.reply.id, title: x.reply.title }))}' data-kind="button_reply">${esc(x.reply.title)}</button>`).join("");
+      return `${head}${esc(i.body?.text)}${foot}<div class="actions">${btns}</div>`;
+    }
+    if (i.type === "list") {
+      const rows = (i.action?.sections || []).flatMap((s) => (s.rows || []).map((r) => `<button class="small ghost" data-reply='${esc(JSON.stringify({ id: r.id, title: r.title, description: r.description }))}' data-kind="list_reply">${esc(r.title)}</button>`)).join("");
+      return `${head}${esc(i.body?.text)}${foot}<div class="actions"><span class="hint">${esc(i.action?.button || "Options")}:</span>${rows}</div>`;
+    }
+  }
+  return `<span class="tag">${esc(t)}</span><pre>${esc(JSON.stringify(b, null, 1))}</pre>`;
+}
+
+function render() {
+  const threads = data.threads || [];
+  if (!current && threads[0]) current = threads[0].phone;
+  $("#customers").innerHTML = threads.map((th) => {
+    const last = th.messages[th.messages.length - 1];
+    const preview = last ? (last.dir === "in" ? "You: " : "Business: ") + (last.type || "") : "No messages yet";
+    return `<div class="list-item ${th.phone === current ? "active" : ""}" data-phone="${th.phone}">
+      <div class="name">${esc(th.name)}</div><div class="sub">+${th.phone} · ${esc(preview)}</div></div>`;
+  }).join("");
+
+  const th = threads.find((x) => x.phone === current);
+  if (!th) { $("#messages").innerHTML = '<div class="empty">No customer selected.</div>'; renderPane(); return; }
+  $("#chat-head").innerHTML = `<strong>${esc(th.name)}</strong> <span class="hint">+${th.phone} → business ${esc(data.config.displayPhone)}</span>`;
+
+  // Reactions are shown on the message they target, not as bubbles.
+  const reactionsOn = {};
+  for (const m of th.messages) {
+    if (m.dir === "out" && m.type === "reaction") reactionsOn[m.body.reaction.message_id] = m.body.reaction.emoji;
+    if (m.dir === "in" && m.type === "reaction") reactionsOn[m.reaction.message_id] = m.reaction.emoji;
+  }
+  const atBottom = $("#messages").scrollHeight - $("#messages").scrollTop - $("#messages").clientHeight < 40;
+  $("#messages").innerHTML = th.messages.filter((m) => m.type !== "reaction").map((m) => {
+    const id = m.id;
+    const react = reactionsOn[id] ? `<span class="reaction">${esc(reactionsOn[id])}</span>` : "";
+    if (m.dir === "in") {
+      return `<div class="bubble in">${m.context ? `<span class="tag">↩ replying to ${esc(m.context.id.slice(-8))}</span>` : ""}${inboundText(m)}${react}<span class="meta">${time(m.at)}</span></div>`;
+    }
+    return `<div class="bubble out" data-id="${esc(id)}">${b_context(m)}${outboundHtml(m)}${react}
+      <div class="tools"><button class="small ghost" data-react="👍">👍</button><button class="small ghost" data-react="❤️">❤️</button>
+      <button class="small ghost" data-quote="1">Reply</button><button class="small ghost" data-status="read">Mark read</button>
+      <button class="small ghost" data-status="failed">Fail</button></div>
+      <span class="meta">${time(m.at)} ${ticks(m.status)}</span></div>`;
+  }).join("") || '<div class="empty">No messages yet — say hi as the customer.</div>';
+  if (atBottom) $("#messages").scrollTop = $("#messages").scrollHeight;
+  renderPane();
+}
+
+function b_context(m) {
+  const ctx = m.body?.context?.message_id;
+  return ctx ? `<span class="tag">↩ quoting ${esc(ctx.slice(-8))}</span>` : "";
+}
+
+function renderPane(force = false) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  // Don't wipe the settings form while someone is typing in it.
+  if (!force && tab === "settings" && $("#pane").contains(document.activeElement)) return;
+  if (tab === "hooks") {
+    $("#pane").innerHTML = `<span class="hint">Register an app webhook endpoint at <code>http://fakes:4010/__hooks/&lt;name&gt;</code> (allowed via WEBHOOK_ALLOWED_PRIVATE_HOSTS).</span>` +
+      (data.hooks.slice().reverse().map((h) => `<div class="card"><strong>${esc(h.event || "(automation step)")}</strong> → ${esc(h.name)}
+        <span class="${h.signatureValid ? "ok" : h.signatureValid === false ? "bad" : "hint"}">${h.signatureValid ? "signature ✓" : h.signatureValid === false ? "signature ✗" : "unsigned / secret unknown"}</span>
+        <span class="hint">${time(h.at)}</span><pre>${esc(JSON.stringify(h.body, null, 1))}</pre></div>`).join("") || '<div class="hint">No deliveries yet.</div>');
+  } else if (tab === "ai") {
+    $("#pane").innerHTML = `<span class="hint">Configure AI in the app as provider "OpenAI-compatible", base URL <code>http://fakes:4010/compat/v1</code>, any API key. Say "human" to trigger a hand-off.</span>` +
+      (data.aiLog.slice().reverse().map((a) => `<div class="card"><strong>${esc(a.provider)}</strong> ${esc(a.kind || a.model || "")} <span class="hint">${time(a.at)}</span>
+        ${a.prompt ? `<pre>Q: ${esc(a.prompt)}\nA: ${esc(a.reply)}</pre>` : `<span class="hint"> ${a.count} embedding(s)</span>`}</div>`).join("") || '<div class="hint">No AI calls yet.</div>');
+  } else if (tab === "templates") {
+    $("#pane").innerHTML = `<span class="hint">Templates in the fake WABA <code>${esc(data.config.wabaId)}</code>. New submissions are auto-approved after ~1.5s.</span>` +
+      data.templates.map((t) => `<div class="card"><strong>${esc(t.name)}</strong> (${esc(t.language)}) — ${esc(t.status)}
+        <div class="row" style="margin-top:6px"><button class="small" data-tstatus="APPROVED" data-tid="${t.id}" data-tname="${esc(t.name)}" data-tlang="${esc(t.language)}">Approve</button>
+        <button class="small ghost" data-tstatus="REJECTED" data-tid="${t.id}" data-tname="${esc(t.name)}" data-tlang="${esc(t.language)}">Reject</button></div></div>`).join("");
+  } else {
+    const s = data.settings;
+    $("#pane").innerHTML = `<div class="card"><strong>Connect the app to this fake number</strong><pre>Phone number ID: ${esc(data.config.phoneNumberId)}
+WABA ID:         ${esc(data.config.wabaId)}
+Access token:    anything (use "bad-token" to see an error)
+Display number:  ${esc(data.config.displayPhone)}</pre></div>
+      <label class="check"><input type="checkbox" id="hold" ${s.holdStatuses ? "checked" : ""}> Hold delivery statuses (messages stay "accepted")</label>
+      <label>Numbers whose delivery fails<input id="fail" value="${esc(s.failDeliveryTo.join(", "))}"></label>
+      <label>Numbers rejected by the send API<input id="reject" value="${esc(s.rejectSendTo.join(", "))}"></label>
+      <button id="save-settings">Save settings</button>
+      <button class="ghost" id="reset">Reset simulator (clears everything)</button>`;
+  }
+}
+
+// ---- events ---------------------------------------------------------
+$("#customers").addEventListener("click", (e) => {
+  const item = e.target.closest("[data-phone]");
+  if (!item) return;
+  current = item.dataset.phone;
+  localStorage.setItem("sim.current", current);
+  quote = null; renderQuote(); render();
+});
+
+$("#add-customer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  await api("/__sim/customers", { phone: f.get("phone"), name: f.get("name") });
+  current = String(f.get("phone")).replace(/\D/g, "");
+  e.target.reset();
+  refresh();
+});
+
+async function sendInbound(extra) {
+  if (!current) return alert("Pick or add a customer first.");
+  const r = await api("/__sim/inbound", { from: current, context_id: quote?.id, ...extra });
+  if (r.status && r.status !== 200) alert(`The app answered ${r.status} — is the WhatsApp number connected in Settings?`);
+  quote = null; renderQuote(); refresh();
+}
+
+$("#composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("#text").value.trim();
+  if (!text) return;
+  $("#text").value = "";
+  sendInbound({ text });
+});
+document.querySelectorAll("[data-media]").forEach((b) =>
+  b.addEventListener("click", () => sendInbound({ media: { kind: b.dataset.media, caption: b.dataset.media === "image" ? "Here is a photo" : undefined } })));
+$("#send-location").addEventListener("click", () => sendInbound({ location: { latitude: 54.6872, longitude: 25.2797, name: "Vilnius office" } }));
+
+$("#messages").addEventListener("click", async (e) => {
+  const bubble = e.target.closest(".bubble.out");
+  const id = bubble?.dataset.id;
+  const b = e.target;
+  if (b.dataset.reply) {
+    const reply = JSON.parse(b.dataset.reply);
+    quote = { id }; // replies to interactive messages carry their context
+    return sendInbound({ [b.dataset.kind]: reply });
+  }
+  if (b.dataset.tbtn) { quote = { id }; return sendInbound({ button: { text: b.dataset.tbtn } }); }
+  if (b.dataset.react && id) return sendInbound({ reaction: { message_id: id, emoji: b.dataset.react } });
+  if (b.dataset.quote && id) { quote = { id }; renderQuote(); $("#text").focus(); return; }
+  if (b.dataset.status && id) { await api("/__sim/status", { message_id: id, status: b.dataset.status }); refresh(); }
+});
+
+function renderQuote() {
+  $("#quote").innerHTML = quote ? `<div class="quote">↩ Replying to ${esc(quote.id.slice(-12))} <button class="small ghost" id="unquote">✕</button></div>` : "";
+  $("#unquote")?.addEventListener("click", () => { quote = null; renderQuote(); });
+}
+
+document.querySelector(".tabs").addEventListener("click", (e) => {
+  if (!e.target.dataset.tab) return;
+  tab = e.target.dataset.tab; renderPane(true);
+});
+$("#pane").addEventListener("click", async (e) => {
+  const b = e.target;
+  if (b.id === "save-settings") {
+    const list = (v) => v.split(",").map((x) => x.trim()).filter(Boolean);
+    await api("/__sim/settings", { holdStatuses: $("#hold").checked, failDeliveryTo: list($("#fail").value), rejectSendTo: list($("#reject").value) });
+    refresh();
+  }
+  if (b.id === "reset" && confirm("Clear all simulator state?")) { await api("/__reset"); current = null; refresh(); }
+  if (b.dataset.tstatus) {
+    await api("/__sim/template-status", { template_id: b.dataset.tid, name: b.dataset.tname, language: b.dataset.tlang, event: b.dataset.tstatus });
+    refresh();
+  }
+});
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

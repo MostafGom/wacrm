@@ -35,6 +35,8 @@ yarn-error.log*
 # keep example files so forkers have a template to copy
 !.env.local.example
 !.env.example
+# dummy values for the local end-to-end stack (docker-compose.e2e.yml)
+!e2e/.env.e2e
 
 # vercel
 .vercel
@@ -42,3 +44,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Playwright output
+/e2e/.output/
+/playwright-report/
+/test-results/
+/e2e/.auth/

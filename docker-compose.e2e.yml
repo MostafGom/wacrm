@@ -1,0 +1,61 @@
+# Local end-to-end test stack — NEVER use for production.
+#
+#   npm run e2e:up      # fresh stack: Postgres + app + fakes + Mailpit + cron
+#   npm run e2e         # Playwright suite against it
+#   npm run e2e:seed    # demo data for clicking around by hand
+#   npm run e2e:down
+#
+# Layered on docker-compose.yml. The app talks to fake services instead of
+# Meta / OpenAI / Anthropic / SMTP, so no external account is needed:
+#   http://localhost:3000   the app
+#   http://localhost:4010   fake WhatsApp phone simulator (+ fake APIs)
+#   http://localhost:8025   Mailpit (every email the app sends)
+# See docs/testing.md.
+
+services:
+  app:
+    # Configuration comes from e2e/.env.e2e (dummy values) + the values
+    # below, never from your .env.local.
+    env_file: !reset []
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_APP_ID: ${META_APP_ID}
+      AUTOMATION_CRON_SECRET: ${AUTOMATION_CRON_SECRET}
+      PUBLIC_URL: http://localhost:${HOST_PORT:-3000}
+      NEXT_PUBLIC_SITE_URL: http://localhost:${HOST_PORT:-3000}
+      # Plain http on localhost — let the session cookie through.
+      INSECURE_COOKIES: 'true'
+      # Email → Mailpit (sign-up confirmation, password reset, email change).
+      SMTP_URL: smtp://mailpit:1025
+      MAIL_FROM: 'wacrm e2e <no-reply@wacrm.test>'
+      # Test-only switches (see .env.local.example → "Testing only").
+      META_GRAPH_BASE_URL: http://fakes:4010/v21.0
+      OPENAI_BASE_URL: http://fakes:4010/openai/v1
+      ANTHROPIC_BASE_URL: http://fakes:4010/anthropic/v1
+      AI_PROVIDER_ALLOWED_PRIVATE_HOSTS: fakes
+      WEBHOOK_ALLOWED_PRIVATE_HOSTS: fakes
+    depends_on:
+      fakes:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  fakes:
+    build:
+      context: ./e2e/fakes
+    environment:
+      PORT: 4010
+      APP_WEBHOOK_URL: http://app:3000/api/whatsapp/webhook
+      FAKES_INTERNAL_URL: http://fakes:4010
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_APP_ID: ${META_APP_ID}
+    ports:
+      - '${FAKES_PORT:-4010}:4010'
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.21.8
+    ports:
+      - '${MAILPIT_PORT:-8025}:8025'
+    restart: unless-stopped

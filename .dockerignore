@@ -4,6 +4,9 @@
 node_modules
 docs
 mcp-server
+e2e
+playwright-report
+test-results
 .data
 *.md
 !README.md
