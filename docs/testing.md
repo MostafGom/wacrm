@@ -63,8 +63,8 @@ Server-side errors show up in `npm run e2e:logs`.
 ## Trying it by hand: the phone simulator
 
 ```bash
-npm run e2e:up
-npm run e2e:seed
+npm run demo        # fresh stack + demo data (same as e2e:up then e2e:seed)
+npm run demo:down   # stop it and delete the data
 ```
 
 The seed signs up four users (owner, admin, agent, viewer, password
